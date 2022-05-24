@@ -17,6 +17,16 @@ struct data data1;
 
 struct kmem_cache *my_cachep = NULL;
 
+static int enable = 0;
+module_param(enable, int, 0644);
+MODULE_PARM_DESC(enable, "Module on/off");
+static int irq = 0;
+module_param(irq, int, 0644);
+MODULE_PARM_DESC(irq, "Interrupt number");
+static int latence = 0;
+module_param(latence, int, 0644);
+MODULE_PARM_DESC(latence, "Max lasting time(us) when interrupt is closed that we can tolerate");
+
 static ssize_t proc_overwrite_switch_write(struct file *file,
 		const char __user *buf,
 		size_t size,
@@ -66,6 +76,9 @@ static int __init start_module(void)
 	struct proc_dir_entry *s_pst_proc_overwrite_flag = NULL;
 	
     printk(KERN_ALERT "Module init.\n");
+    printk("enable == %d\n", enable);
+    printk("irq == %d\n", irq);
+    printk("latence == %d\n", latence);
     
     my_cachep = kmem_cache_create("my_cache", sizeof(struct data), 0, SLAB_HWCACHE_ALIGN, NULL);
     if(my_cachep == NULL ){
