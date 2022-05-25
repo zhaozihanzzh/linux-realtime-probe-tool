@@ -15,6 +15,7 @@ struct data{
 	char number[16];
 };
 struct data data1;
+int list_size = 0;
 
 struct kmem_cache *my_cachep = NULL;
 
@@ -46,6 +47,7 @@ static ssize_t proc_overwrite_switch_write(struct file *file,
 			
 	strcpy(p->number, tmp);
 	list_add_tail(&p->list, &data1.list);
+	++list_size;
 		
 	return size;
 }
@@ -57,8 +59,13 @@ static ssize_t proc_overwrite_switch_read(struct file *file,
 {
 	char tmp_buf[16] = {0};
 	int len;
-	
 	struct data *first;
+	
+	if(list_size == 0){
+		len=snprintf(tmp_buf, 16, "%s", "Empty.\n");
+		return simple_read_from_buffer(buf, size, ppos, tmp_buf, len);
+	}		
+	--list_size;
 	first = list_first_entry(&data1.list, struct data, list);
 	list_del(&first->list);
 	printk("GHTEST: overwrite disck == %s\n", first->number);
