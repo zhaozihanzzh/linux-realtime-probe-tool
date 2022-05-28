@@ -6,7 +6,9 @@
 #include <linux/slab.h>
 #include <linux/time.h>
 #include <linux/fdtable.h>
+#include <linux/list.h>
 
+#include "irq_disable.h"
 // 抓取单一中断的关闭
 static struct kprobe disable_irq_nosync_probe = {
     .symbol_name = "disable_irq_nosync"
@@ -22,12 +24,18 @@ static unsigned long nsec_limit = 1000000; // 以纳秒为单位的关闭时间
 static struct timespec64 close_time; // 关闭的时间
 
 static int MAX_STACK_TRACE_DEPTH = 64;
-struct stack_trace trace;
+unsigned int nr_entries;
 unsigned long *entries; // 关中断时的堆栈信息
 struct files_struct* files; // 文件
 
 static int MASK_ID = 18;
 static bool is_disabled = false;
+
+// 链表
+struct process_info single_list_head = 
+{
+    .list = LIST_HEAD_INIT(single_list_head.list),
+};
 
 static void get_data(void) {
     // 检查，如果链表非空，则输出
@@ -43,13 +51,7 @@ static void get_data(void) {
     }
 }
 
-static void clear(void) {
-    // TODO：检查，如果链表非空，则回收
-    kfree(entries);
-}
-
 static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
-    pr_info("IRQ %lu disabled\n", regs->di);
     // 抓取函数的第一个参数（x86_64 把它放在 rdi 寄存器中），即中断号
     if (regs->di != MASK_ID) {
         return 0;
@@ -58,11 +60,13 @@ static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
     
     entries = kmalloc(MAX_STACK_TRACE_DEPTH * sizeof(*entries), GFP_KERNEL);
     if (entries) {
+        struct stack_trace trace;
         trace.nr_entries = 0;
         trace.max_entries = MAX_STACK_TRACE_DEPTH;
         trace.entries = entries;
         trace.skip = 0;
         save_stack_trace_tsk(get_current(), &trace);
+        nr_entries = trace.nr_entries;
     }
     is_disabled = true;
     return 0;
@@ -73,19 +77,34 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
         return 0;
     }
     if (is_disabled) {
+        time64_t duration;
         ktime_get_ts64(&open_time);
-        if ((open_time.tv_sec - close_time.tv_sec) * 100000000ll + open_time.tv_nsec - close_time.tv_nsec > nsec_limit) {
-            // 获取打开的文件等 https://www.kernel.org/doc/html/latest/translations/zh_CN/core-api/irq/irqflags-tracing.html
+        duration = (open_time.tv_sec - close_time.tv_sec) * 1000000000ll + open_time.tv_nsec - close_time.tv_nsec;
+        if (duration > nsec_limit) {
             int i = 0;
             struct fdtable *files_table;
+            // 记录关中断的进程信息
+            struct process_info *single_list_node = kmalloc(sizeof(struct process_info), GFP_KERNEL);
+            single_list_node->cpu = get_current()->cpu;
+            single_list_node->pid = get_current()->pid;
+            memcpy(single_list_node->comm, get_current()->comm, TASK_COMM_LEN);
+            single_list_node->duration = duration;
+            single_list_node->entries = entries;
+            single_list_node->nr_entries = nr_entries;
+
+            // 获取打开的文件等 https://www.kernel.org/doc/html/latest/translations/zh_CN/core-api/irq/irqflags-tracing.html
             files_table = files_fdtable(get_current()->files);
             while (files_table->fd[i] != NULL) {
                 char *file_name = kmalloc(256 * sizeof(char), GFP_KERNEL);
                 const char *path = d_path(&files_table->fd[i++]->f_path, file_name, 256);
-                // TODO：将 path 和 file_name 加入链表中，并要记得回收（如果不及时复制的话，万一进程删除了文件怎么办呢？）
+                // TODO： 将 path 和 file_name 加入链表中（如果不及时复制的话，万一文件被删除，可能再也无法获取文件名）
             }
+            INIT_LIST_HEAD(&single_list_node->list);
             // 加入链表中（把指针挂入）
-            get_data();
+            list_add_tail(&single_list_node->list, &single_list_head.list);
+            // TODO：如果链表长度超过 100，删除最老的元素
+        } else {
+            kfree(entries);
         }
     }
     is_disabled = false;
@@ -121,6 +140,6 @@ static void exit_probe(void) {
     unregister_kprobe(&disable_irq_nosync_probe);
     unregister_kprobe(&disable_irq_probe);
     unregister_kprobe(&enable_irq_probe);
-    clear();
+    clear(&single_list_head.list);
     pr_info("kprobes removed.\n");
 }
