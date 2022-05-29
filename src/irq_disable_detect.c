@@ -32,10 +32,13 @@ static int MASK_ID = 18;
 static bool is_disabled = false;
 
 // 链表
+// 头结点数据域不使用
 struct process_info single_list_head = 
 {
     .list = LIST_HEAD_INIT(single_list_head.list),
 };
+unsigned int length = 0; // 链表长度
+#define LENGTH_LIMIT 20
 
 static void get_data(void) {
     // 检查，如果链表非空，则输出
@@ -56,7 +59,7 @@ static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
     if (regs->di != MASK_ID) {
         return 0;
     }
-    ktime_get_real_ts64(&close_time); // 记录关中断的时间
+    ktime_get_ts64(&close_time); // 记录关中断的时间
     
     entries = kmalloc(MAX_STACK_TRACE_DEPTH * sizeof(*entries), GFP_KERNEL);
     if (entries) {
@@ -83,6 +86,7 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
         if (duration > nsec_limit) {
             int i = 0;
             struct fdtable *files_table;
+            struct file_node **next_file;
             // 记录关中断的进程信息
             struct process_info *single_list_node = kmalloc(sizeof(struct process_info), GFP_KERNEL);
             single_list_node->cpu = get_current()->cpu;
@@ -91,18 +95,30 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
             single_list_node->duration = duration;
             single_list_node->entries = entries;
             single_list_node->nr_entries = nr_entries;
+            single_list_node->files_list = NULL;
 
-            // 获取打开的文件等 https://www.kernel.org/doc/html/latest/translations/zh_CN/core-api/irq/irqflags-tracing.html
+            // 获取打开的文件等 http://tuxthink.blogspot.in/2012/05/module-to-print-open-files-of-process.html
             files_table = files_fdtable(get_current()->files);
-            while (files_table->fd[i] != NULL) {
-                char *file_name = kmalloc(256 * sizeof(char), GFP_KERNEL);
-                const char *path = d_path(&files_table->fd[i++]->f_path, file_name, 256);
-                // TODO： 将 path 和 file_name 加入链表中（如果不及时复制的话，万一文件被删除，可能再也无法获取文件名）
+            next_file = &single_list_node->files_list;
+            while (likely(files_table->fd[i] != NULL)) {
+                *next_file = kmalloc(sizeof(struct file_node), GFP_KERNEL);
+                (*next_file)->buffer = kmalloc(256 * sizeof(char), GFP_KERNEL);
+                (*next_file)->path = d_path(&files_table->fd[i++]->f_path, (*next_file)->buffer, 256);
+                (*next_file)->next = NULL;
+                next_file = &(*next_file)->next;
+                // 将 path 和 file_name 加入链表中（如果不及时复制的话，万一文件被删除，可能再也无法获取文件名）
             }
             INIT_LIST_HEAD(&single_list_node->list);
             // 加入链表中（把指针挂入）
             list_add_tail(&single_list_node->list, &single_list_head.list);
-            // TODO：如果链表长度超过 100，删除最老的元素
+            if (length >= LENGTH_LIMIT) {
+                // 如果链表长度超过上限，删除最老的元素
+                struct list_head *to_delete = single_list_head.list.next;
+                list_del(to_delete);
+                clear_node(list_entry(to_delete, struct process_info, list));
+            } else {
+                ++length;
+            }
         } else {
             kfree(entries);
         }
