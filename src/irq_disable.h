@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include <linux/list.h>
+#include <linux/slab.h>
 // 目前，只能在检测关所有中断和屏蔽指定中断号之间二选一
 // 用于记录进程打开的文件，这里我们没有用内核链表，因为我们对链表所作的操作很简单
 struct file_node
@@ -22,6 +23,8 @@ struct process_info
     struct file_node *files_list;
     struct list_head list;
 };
+
+#define MAX_STACK_TRACE_DEPTH 64
 
 // TODO：输出至 procfs
 static void print_list(struct list_head *head)
