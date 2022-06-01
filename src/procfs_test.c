@@ -134,7 +134,7 @@ static ssize_t proc_enable_read(struct file *file,
 	char tmp_buf[16] = {0};
 	int len = 0;
 	
-	len=snprintf(tmp_buf, 16, "%d", enable);
+	len=snprintf(tmp_buf, 16, "%d\n", enable);
 	return simple_read_from_buffer(buf, size, ppos, tmp_buf, len);
 }
 
@@ -160,7 +160,7 @@ static ssize_t proc_irq_write(struct file *file,
 		return -EINVAL;
 	it = tmp;
 	for (i = 0; (c = *it) != 0x00 ; ++it) {
-		if ('0' <= (c = *it) && c <= '9') {
+		if ('0' <= c && c <= '9') {
 			i = i*10 + c - '0';
 		} else {
 			return -EINVAL;
@@ -181,7 +181,7 @@ static ssize_t proc_irq_read(struct file *file,
 	char tmp_buf[16] = {0};
 	int len = 0;
 	
-	len=snprintf(tmp_buf, 16, "%d", irq);
+	len=snprintf(tmp_buf, 16, "%d\n", irq);
 	return simple_read_from_buffer(buf, size, ppos, tmp_buf, len);
 }
 
@@ -207,7 +207,7 @@ static ssize_t proc_latence_write(struct file *file,
 		return -EINVAL;
 	it = tmp;
 	for (i = 0; (c = *it) != 0x00 ; ++it) {
-		if ('0' <= (c = *it) && c <= '9') {
+		if ('0' <= c && c <= '9') {
 			i = i*10 + c - '0';
 		} else {
 			return -EINVAL;
@@ -228,8 +228,33 @@ static ssize_t proc_latence_read(struct file *file,
 	char tmp_buf[16] = {0};
 	int len = 0;
 	
-	len=snprintf(tmp_buf, 16, "%d", latence);
+	len=snprintf(tmp_buf, 16, "%d\n", latence);
 	return simple_read_from_buffer(buf, size, ppos, tmp_buf, len);
+}
+
+// 用户写process_info文件，以清空process_info
+static ssize_t proc_process_info_write(struct file *file,
+		const char __user *buf,
+		size_t size,
+		loff_t *offset)
+{
+	char tmp[16] = {0};
+	
+	if(copy_from_user(&tmp, buf, size))
+		return -EFAULT;
+		
+	if(tmp[strlen(tmp)] == '\n')
+		tmp[strlen(tmp)] = 0x00;
+	if(tmp[strlen(tmp)-1] == '\n')
+		tmp[strlen(tmp)-1] = 0x00;
+			
+	if(strcmp("0", tmp) == 0 || strcmp("clear", tmp) == 0) {
+		//clear();
+		printk("process_info cleared.");
+	} else {
+		return -EINVAL;
+	}
+	return size;
 }
 
 // 用户读process_info文件，以获取进程信息 
@@ -276,6 +301,7 @@ static struct file_operations irq_fops = {
 };
 
 static struct file_operations process_info_fops = {
+	.write = proc_process_info_write,
 	.read = proc_process_info_read,
 };
 
@@ -299,7 +325,7 @@ static int __init start_module(void)
     	printk("create parent_dir failed\n");
     	return -ENOMEM;
 	}
-	// 在/proc/realtime_probe_tool下创建4个文件 
+	// 在/proc/realtime_probe_tool下创建5个文件 
     if(!proc_create("overwrite_disck", 0744, parent_dir, &s_st_overwrite_switch_fops)){
     	printk("create overwrite_disck failed\n");
     	return -ENOMEM;
