@@ -33,7 +33,12 @@ static void print_list(struct list_head *head)
     struct process_info *pos;
     list_for_each_entry(pos, head, list)
     {
-        struct file_node *file_item = pos->files_list;
+        struct file_node *file_item;
+        if (pos == NULL)
+        {
+            continue;
+        }
+        file_item = pos->files_list;
         pr_info("IRQ disabled %lldns on cpu %u by pid %d, comm %s\n", (long long)pos->duration, pos->cpu, pos->pid, pos->comm);
         pr_info("Backtrace:\n");
         for (i = 0; i < pos->nr_entries; ++i) {
@@ -54,7 +59,12 @@ static void clear(struct list_head *head) {
     struct process_info *n;
     list_for_each_entry_safe(pos, n, head, list)
     {
-        struct file_node *file_item = pos->files_list;
+        struct file_node *file_item;
+        if (pos == NULL)
+        {
+            continue;
+        }
+        file_item = pos->files_list;
         while (file_item != NULL) {
             struct file_node *next = file_item->next;
             kfree(file_item->buffer);
