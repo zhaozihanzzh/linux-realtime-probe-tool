@@ -2,6 +2,8 @@
 #include <linux/list.h>
 #include <linux/slab.h>
 // 目前，只能在检测关所有中断和屏蔽指定中断号之间二选一
+extern int MASK_ID;
+extern time64_t nsec_limit;
 // 用于记录进程打开的文件，这里我们没有用内核链表，因为我们对链表所作的操作很简单
 struct file_node
 {
@@ -26,32 +28,6 @@ struct process_info
 
 #define MAX_STACK_TRACE_DEPTH 64
 
-// TODO：输出至 procfs
-static void print_list(struct list_head *head)
-{
-    unsigned int i;
-    struct process_info *pos;
-    list_for_each_entry(pos, head, list)
-    {
-        struct file_node *file_item;
-        if (pos == NULL)
-        {
-            continue;
-        }
-        file_item = pos->files_list;
-        pr_info("IRQ disabled %lldns on cpu %u by pid %d, comm %s\n", (long long)pos->duration, pos->cpu, pos->pid, pos->comm);
-        pr_info("Backtrace:\n");
-        for (i = 0; i < pos->nr_entries; ++i) {
-            pr_info("   [<%p>] %pS\n", (void*)pos->entries[i], (void*)pos->entries[i]);
-        }
-        pr_info("Files:\n");
-        while (file_item != NULL) {
-            pr_info("   %s\n", file_item->path);
-            file_item = file_item->next;
-        }
-        pr_info("-- End item --\n");
-    }
-}
 
 static void clear(struct list_head *head) {
     // 回收链表

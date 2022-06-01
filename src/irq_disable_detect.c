@@ -20,15 +20,12 @@ static struct kprobe enable_irq_probe = {
     .symbol_name = "enable_irq"
 };
 
-static unsigned long nsec_limit = 1000000; // 以纳秒为单位的关闭时间
 static struct timespec64 close_time; // 关闭的时间
 
-static int MAX_STACK_TRACE_DEPTH = 64;
 unsigned int nr_entries;
 unsigned long *entries; // 关中断时的堆栈信息
 struct files_struct* files; // 文件
 
-static int MASK_ID = 18;
 static bool is_disabled = false;
 
 // 链表
@@ -40,19 +37,6 @@ struct process_info single_list_head =
 unsigned int length = 0; // 链表长度
 #define LENGTH_LIMIT 20
 
-static void get_data(void) {
-    // 检查，如果链表非空，则输出
-    unsigned i = 0;
-    for (i = 0; i < trace.nr_entries; ++i) {
-        pr_info("[<%p>] %pS\n", (void*)entries[i], (void*)entries[i]);
-    }
-    for (i = 0; i < NR_OPEN_DEFAULT; ++i) {
-        char file_name[256];
-        dentry_path_raw(files->fd_array[i]->f_path.dentry, file_name, 256);
-        pr_info("File name: %s\n", file_name);
-        // TODO：完善输出
-    }
-}
 
 static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
     // 抓取函数的第一个参数（x86_64 把它放在 rdi 寄存器中），即中断号
@@ -157,5 +141,6 @@ static void exit_probe(void) {
     unregister_kprobe(&disable_irq_probe);
     unregister_kprobe(&enable_irq_probe);
     clear(&single_list_head.list);
+    list_del_init(&single_list_head.list); // 头结点指向自己
     pr_info("kprobes removed.\n");
 }
