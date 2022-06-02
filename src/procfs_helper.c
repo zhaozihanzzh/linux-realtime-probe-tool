@@ -65,8 +65,8 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
             continue;
         }
         file_item = pos->files_list;
-        // TODO：换行代码
-        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "IRQ disabled %lldns on cpu %u by pid %d, comm %s\n", (long long)pos->duration, pos->cpu, pos->pid, pos->comm));
+        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
+			"IRQ disabled %lldns on cpu %u by pid %d, comm %s\n", (long long)pos->duration, pos->cpu, pos->pid, pos->comm));
 		if (curr_count < 0) {
 			pr_warn("Read failed=%ld\n",curr_count);
 			return curr_count;
@@ -77,7 +77,8 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
 			return curr_count;
 		} else char_count += curr_count;
 		for (i = 0; i < pos->nr_entries; ++i) {
-            curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "   [<%p>] %pS\n", (void*)pos->entries[i], (void*)pos->entries[i]));
+            curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
+				"   [<%p>] %pS\n", (void*)pos->entries[i], (void*)pos->entries[i]));
 			if (curr_count < 0) {
 				pr_warn("Read failed=%ld\n",curr_count);
 				return curr_count;
@@ -169,7 +170,7 @@ static ssize_t proc_enable_write(struct file *file,
 	if(strcmp("0", tmp) == 0){
 		if (enable == 1) {
 			// local disable
-
+			exit_trace();
 		} else if (enable == 2) {
 			exit_probe();
 		}
@@ -178,10 +179,11 @@ static ssize_t proc_enable_write(struct file *file,
 	} else if(strcmp("1", tmp) == 0) {
 		if (enable == 0) {
 			// local enable
-
+			start_trace();
 		} else if (enable == 2) {
 			exit_probe();
 			// local enable
+			start_trace();
 		}
 		enable = 1;
 		printk("module enabled. enable == %d\n", enable);
@@ -190,7 +192,8 @@ static ssize_t proc_enable_write(struct file *file,
 			start_probe();
 		} else if (enable == 1) {
 			// local disable
-			
+			exit_trace();
+			start_probe();
 		}
 		enable = 2;
 	}
@@ -334,6 +337,8 @@ static ssize_t proc_process_info_write(struct file *file,
 	if(strcmp("0", tmp) == 0) {
 		if (enable == 1) {
 			// clear global
+			exit_trace();
+			start_trace();
 		} else if (enable == 2) {
 			exit_probe();
 			start_probe();
@@ -353,8 +358,28 @@ static ssize_t proc_process_info_read(struct file *file,
 {
 	if (*ppos) return 0;
 	if (enable == 1) {
-		// global output
-		return 0;
+    	unsigned int cpu;
+		ssize_t ret = 0;
+    	preempt_disable();
+    	for_each_present_cpu(cpu)
+    	{
+    	    pr_info("On CPU %u:\n", cpu);
+    	    // 如果访问的不是当前 CPU，要先看 local_list_mark 的值
+    	    if (cpu != smp_processor_id())
+    	    {
+    	        while (!atomic_cmpxchg(per_cpu_ptr(&local_list_mark, cpu), 1, 0)) ;
+    	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
+    	        atomic_set(per_cpu_ptr(&local_list_mark, cpu), 1);
+    	    }
+    	    else
+    	    {
+    	        // 如果访问的是当前 CPU 的，不需要用 local_list_mark 保护
+    	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
+    	    }
+    	    pr_info("----\n");
+    	}
+    	preempt_enable();
+		return ret;
 	}
 	if (enable == 2) {
 		return print_list(&single_list_head.list, buf, size, ppos);
@@ -445,7 +470,7 @@ static void __exit exit_module(void)
 	kmem_cache_destroy(my_cachep);
 	remove_proc_subtree("realtime_probe_tool", NULL);
 	if (enable == 1) {
-
+		exit_trace();
 	} else if (enable == 2) {
 		exit_probe();
 	}

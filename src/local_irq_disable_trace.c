@@ -120,7 +120,6 @@ static void unregister_tracepoints(struct tp_and_name *tracepoints, int count)
 }
 
 DEFINE_PER_CPU(struct timespec64, disable_local_irq_time); // 上次关中断的时间
-static time64_t nsec_limit = 1000000;
 DEFINE_PER_CPU(bool, has_off_record) = false;
 
 // 链表
@@ -240,31 +239,7 @@ static struct tp_and_name tps[TP_NUM] = {
     }
 };
 
-static void local_irq_disable_output(void)
-{
-    unsigned int cpu;
-    preempt_disable();
-    for_each_present_cpu(cpu)
-    {
-        pr_info("On CPU %u:\n", cpu);
-        // 如果访问的不是当前 CPU，要先看 local_list_mark 的值
-        if (cpu != smp_processor_id())
-        {
-            while (!atomic_cmpxchg(per_cpu_ptr(&local_list_mark, cpu), 1, 0)) ;
-            print_list(per_cpu_ptr(&local_list_head.list, cpu));
-            atomic_set(per_cpu_ptr(&local_list_mark, cpu), 1);
-        }
-        else
-        {
-            // 如果访问的是当前 CPU 的，不需要用 local_list_mark 保护
-            print_list(per_cpu_ptr(&local_list_head.list, cpu));
-        }
-        pr_info("----\n");
-    }
-    preempt_disable();
-}
-
-static int start_trace(void) {
+int start_trace(void) {
     unsigned int cpu;
     // 访问 per_cpu 时禁止调度
     preempt_disable();
@@ -279,7 +254,7 @@ static int start_trace(void) {
     return register_tracepoints(tps, TP_NUM);
 }
 
-static void exit_trace(void) {
+void exit_trace(void) {
     unsigned int cpu;
     unregister_tracepoints(tps, TP_NUM);
 
@@ -290,6 +265,7 @@ static void exit_trace(void) {
         clear(per_cpu_ptr(&local_list_head.list, cpu));
         atomic_set(per_cpu_ptr(&local_list_mark, cpu), 1);
         pr_info("----\n");
+        INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu)); // 头结点指向自己
     }
     pr_info("Realtime probe module exit\n");
 }

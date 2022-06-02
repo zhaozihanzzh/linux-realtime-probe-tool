@@ -112,7 +112,7 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
 }
 
 
-static int start_probe(void) {
+int start_probe(void) {
     int ret;
     disable_irq_nosync_probe.pre_handler = pre_handler_disable_irq;
     disable_irq_probe.pre_handler = pre_handler_disable_irq;
@@ -136,11 +136,15 @@ static int start_probe(void) {
     pr_info("Planted kprobes finished.\n");
     return 0;
 }
-static void exit_probe(void) {
+void exit_probe(void) {
     unregister_kprobe(&disable_irq_nosync_probe);
     unregister_kprobe(&disable_irq_probe);
     unregister_kprobe(&enable_irq_probe);
+    if (length == 0)
+    {
+        pr_info("No IRQ disable traced.\n");
+    }
     clear(&single_list_head.list);
-    list_del_init(&single_list_head.list); // 头结点指向自己
-    pr_info("kprobes removed.\n");
+    INIT_LIST_HEAD(&single_list_head.list); // 头结点指向自己
+    pr_info("Stop probe IRQ disable.\n");
 }
