@@ -25,6 +25,7 @@ static struct timespec64 close_time; // 关闭的时间
 unsigned int nr_entries;
 unsigned long *entries; // 关中断时的堆栈信息
 struct files_struct* files; // 文件
+static struct kmem_cache *file_node_cache;
 
 static bool is_disabled = false;
 
@@ -72,7 +73,25 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
             struct fdtable *files_table;
             struct file_node **next_file;
             // 记录关中断的进程信息
-            struct process_info *single_list_node = kmalloc(sizeof(struct process_info), GFP_KERNEL);
+            struct process_info *single_list_node;
+            if (length >= LENGTH_LIMIT) {
+                // 如果链表长度超过上限，删除最老的记录并将其存储空间让给新记录
+                struct list_head *to_delete = single_list_head.list.next;
+                struct file_node *file_item;
+                single_list_node = list_entry(to_delete, struct process_info, list);
+                file_item = single_list_node->files_list;
+                list_del(to_delete);
+                --length;
+                // 回收最老的记录的文件列表
+                while (file_item != NULL) {
+                    struct file_node *next = file_item->next;
+                    kmem_cache_free(file_node_cache, file_item);
+                    file_item = next;
+                }
+                kfree(single_list_node->entries);
+            } else {
+                single_list_node = kmalloc(sizeof(struct process_info), GFP_ATOMIC);
+            }
             single_list_node->cpu = get_current()->cpu;
             single_list_node->pid = get_current()->pid;
             memcpy(single_list_node->comm, get_current()->comm, TASK_COMM_LEN);
@@ -85,24 +104,16 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
             files_table = files_fdtable(get_current()->files);
             next_file = &single_list_node->files_list;
             while (likely(files_table->fd[i] != NULL)) {
-                *next_file = kmalloc(sizeof(struct file_node), GFP_KERNEL);
-                (*next_file)->buffer = kmalloc(256 * sizeof(char), GFP_KERNEL);
+                *next_file = kmem_cache_alloc(file_node_cache, GFP_ATOMIC);
                 (*next_file)->path = d_path(&files_table->fd[i++]->f_path, (*next_file)->buffer, 256);
                 (*next_file)->next = NULL;
                 next_file = &(*next_file)->next;
                 // 将 path 和 file_name 加入链表中（如果不及时复制的话，万一文件被删除，可能再也无法获取文件名）
             }
-            INIT_LIST_HEAD(&single_list_node->list);
             // 加入链表中（把指针挂入）
+            INIT_LIST_HEAD(&single_list_node->list);
             list_add_tail(&single_list_node->list, &single_list_head.list);
-            if (length >= LENGTH_LIMIT) {
-                // 如果链表长度超过上限，删除最老的元素
-                struct list_head *to_delete = single_list_head.list.next;
-                list_del(to_delete);
-                clear_node(list_entry(to_delete, struct process_info, list));
-            } else {
-                ++length;
-            }
+            ++length;
         } else {
             kfree(entries);
         }
@@ -114,6 +125,11 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
 
 int start_probe(void) {
     int ret;
+    file_node_cache = kmem_cache_create("file_node_cache", sizeof(struct file_node), 0, SLAB_HWCACHE_ALIGN, NULL);
+    if(file_node_cache == NULL) {
+        pr_err("create file_node_cache failed!\n");
+        return -ENOMEM;
+	}
     disable_irq_nosync_probe.pre_handler = pre_handler_disable_irq;
     disable_irq_probe.pre_handler = pre_handler_disable_irq;
     enable_irq_probe.pre_handler = pre_handler_enable_irq;
@@ -133,7 +149,7 @@ int start_probe(void) {
         pr_err("can't register enable_irq_probe, ret=%d\n", ret);
         return ret;
     }
-    pr_info("Planted kprobes finished.\n");
+    pr_info("Start probe IRQ disable.\n");
     return 0;
 }
 void exit_probe(void) {
@@ -144,7 +160,9 @@ void exit_probe(void) {
     {
         pr_info("No IRQ disable traced.\n");
     }
-    clear(&single_list_head.list);
+    clear(&single_list_head.list, file_node_cache);
     INIT_LIST_HEAD(&single_list_head.list); // 头结点指向自己
+    kmem_cache_destroy(file_node_cache);
+    length = 0;
     pr_info("Stop probe IRQ disable.\n");
 }

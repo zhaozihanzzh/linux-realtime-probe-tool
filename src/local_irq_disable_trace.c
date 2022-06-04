@@ -127,6 +127,8 @@ DEFINE_PER_CPU(bool, has_off_record) = false;
 DEFINE_PER_CPU(struct process_info, local_list_head);
 DEFINE_PER_CPU(unsigned int, local_list_length) = 0; // 链表长度
 #define LENGTH_LIMIT 20
+// 缓存
+DEFINE_PER_CPU(struct kmem_cache *, file_node_cache);
 
 // 原子操作，标记是否已在操作链表
 DEFINE_PER_CPU(atomic_t, local_list_mark);
@@ -165,7 +167,28 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             struct file_node **next_file;
             struct task_struct *on_irq_task = get_current();
             // 记录关中断的进程信息
-            struct process_info *local_list_node = kmalloc(sizeof(struct process_info), GFP_ATOMIC);
+            struct process_info *local_list_node;
+            // 这里不可以使用 spin_lock，因为 spin_unlock 时必然会打开抢占，不管在执行 spin_lock 时是否已关闭抢占
+            while (!atomic_cmpxchg(this_cpu_ptr(&local_list_mark), 1, 0)) ;
+            if (likely(*this_cpu_ptr(&local_list_length) >= LENGTH_LIMIT)) {
+                // 如果链表长度超过上限，删除最老的记录并将其存储空间让给新记录
+                // 但是，会不会保留关中断时间最长的更合理？
+                struct list_head *local_to_delete = *this_cpu_ptr(&local_list_head.list.next);
+                struct file_node *file_item;
+                local_list_node = list_entry(local_to_delete, struct process_info, list);
+                file_item = local_list_node->files_list;
+                list_del(local_to_delete);
+                --*this_cpu_ptr(&local_list_length);
+                // 回收最老的记录的文件列表
+                while (file_item != NULL) {
+                    struct file_node *next = file_item->next;
+                    kmem_cache_free(*this_cpu_ptr(&file_node_cache), file_item);
+                    file_item = next;
+                }
+                kfree(local_list_node->entries);
+            } else {
+                local_list_node = kmalloc(sizeof(struct process_info), GFP_ATOMIC);
+            }
             local_list_node->cpu = on_irq_task->cpu;
             local_list_node->pid = on_irq_task->pid;
             memcpy(local_list_node->comm, on_irq_task->comm, TASK_COMM_LEN);
@@ -190,15 +213,8 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
                 files_table = files_fdtable(on_irq_task->files);
                 next_file = &local_list_node->files_list;
                 while (likely(files_table->fd[i] != NULL)) {
-                    *next_file = kmalloc(sizeof(struct file_node), GFP_ATOMIC);
+                    *next_file = kmem_cache_alloc(*this_cpu_ptr(&file_node_cache), GFP_ATOMIC);
                     // 将 path 和 buffer 加入链表中（如果不及时复制的话，万一文件被删除，可能再也无法获取文件名）
-                    if (*next_file == NULL) {
-                        pr_warn("E! Can't alloc memory for next_file.\n");
-                    }
-                    (*next_file)->buffer = kmalloc(256 * sizeof(char), GFP_ATOMIC);
-                    if ((*next_file)->buffer == NULL) {
-                        pr_warn("E! Can't alloc memory for buffer.\n");
-                    }
                     (*next_file)->path = d_path(&files_table->fd[i++]->f_path, (*next_file)->buffer, 256);
                     (*next_file)->next = NULL;
                     next_file = &(*next_file)->next;
@@ -206,18 +222,8 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             }
             // 加入链表中（把指针挂入）
             INIT_LIST_HEAD(&local_list_node->list);
-            // 这里不可以使用 spin_lock，因为 spin_unlock 时必然会打开抢占，不管在执行 spin_lock 时是否已关闭抢占
-            while (!atomic_cmpxchg(this_cpu_ptr(&local_list_mark), 1, 0)) ;
             list_add_tail(&local_list_node->list, this_cpu_ptr(&local_list_head.list));
-            if (*this_cpu_ptr(&local_list_length) >= LENGTH_LIMIT) {
-                // 如果链表长度超过上限，删除最老的元素
-                // 但是，会不会保留关中断时间最长的更合理？
-                struct list_head *local_to_delete = *this_cpu_ptr(&local_list_head.list.next);
-                list_del(local_to_delete);
-                clear_node(list_entry(local_to_delete, struct process_info, list));
-            } else {
-                ++*this_cpu_ptr(&local_list_length);
-            }
+            ++*this_cpu_ptr(&local_list_length);
             atomic_set(this_cpu_ptr(&local_list_mark), 1);
             
         }
@@ -249,6 +255,7 @@ int start_trace(void) {
         // 初始化链表
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu));
         *per_cpu_ptr(&local_tracing, cpu) = false;
+        *per_cpu_ptr(&file_node_cache, cpu) = kmem_cache_create("file_node_cache", sizeof(struct file_node), 0, SLAB_HWCACHE_ALIGN, NULL);
     }
     preempt_enable();
     return register_tracepoints(tps, TP_NUM);
@@ -262,10 +269,11 @@ void exit_trace(void) {
     {
         // 回收链表
         while (!atomic_cmpxchg(per_cpu_ptr(&local_list_mark, cpu), 1, 0)) ;
-        clear(per_cpu_ptr(&local_list_head.list, cpu));
+        clear(per_cpu_ptr(&local_list_head.list, cpu), *per_cpu_ptr(&file_node_cache, cpu));
         atomic_set(per_cpu_ptr(&local_list_mark, cpu), 1);
-        pr_info("----\n");
+        *per_cpu_ptr(&local_list_length, cpu) = 0;
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu)); // 头结点指向自己
+        kmem_cache_destroy(*per_cpu_ptr(&file_node_cache, cpu));
     }
-    pr_info("Realtime probe module exit\n");
+    pr_info("Exit local irq disable trace.\n");
 }

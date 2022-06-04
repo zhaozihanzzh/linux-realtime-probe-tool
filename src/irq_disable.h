@@ -29,7 +29,7 @@ struct process_info
 #define MAX_STACK_TRACE_DEPTH 64
 
 
-static void clear(struct list_head *head) {
+static void clear(struct list_head *head, struct kmem_cache *file_node_cache) {
     // 回收链表
     struct process_info *pos;
     struct process_info *n;
@@ -43,8 +43,7 @@ static void clear(struct list_head *head) {
         file_item = pos->files_list;
         while (file_item != NULL) {
             struct file_node *next = file_item->next;
-            kfree(file_item->buffer);
-            kfree(file_item);
+            kmem_cache_free(file_node_cache, file_item);
             file_item = next;
         }
         kfree(pos->entries);
@@ -52,13 +51,12 @@ static void clear(struct list_head *head) {
     }
 }
 
-static void clear_node(struct process_info *node) {
+static void clear_node(struct process_info *node, struct kmem_cache *file_node_cache) {
     // 回收单一结点
     struct file_node *file_item = node->files_list;
     while (file_item != NULL) {
         struct file_node *next = file_item->next;
-        kfree(file_item->buffer);
-        kfree(file_item);
+        kmem_cache_free(file_node_cache, file_item);
         file_item = next;
     }
     kfree(node->entries);

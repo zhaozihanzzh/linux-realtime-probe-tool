@@ -6,7 +6,6 @@
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
 #include <linux/list.h>
-#include <linux/slab.h>
 
 #include "irq_disable.h"
 #include "procfs_helper.h"
@@ -14,14 +13,7 @@
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("QunChuWoLao");
 
-struct data{
-	struct list_head list;
-	char number[16];
-};
-struct data data1;
 int list_size = 0;
-
-struct kmem_cache *my_cachep = NULL;
 
 // 3个参数：开关、中断号、时长阈值 
 static int enable = 0; // 0 - 关闭（默认）；1 - 全局； 2 - 某一中断号
@@ -106,51 +98,6 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
     return char_count;
 }
 
-static ssize_t proc_overwrite_switch_write(struct file *file,
-		const char __user *buf,
-		size_t size,
-		loff_t *offset)
-{
-	char tmp[16] = {0};
-	struct data *p = (struct data*)kmem_cache_zalloc(my_cachep, GFP_KERNEL);
-	
-	if(copy_from_user(&tmp, buf, size))
-		return -EFAULT;
-		
-	if(tmp[strlen(tmp)] == '\n')
-		tmp[strlen(tmp)] = 0x00;
-	if(tmp[strlen(tmp)-1] == '\n')
-		tmp[strlen(tmp)-1] = 0x00;
-			
-	strcpy(p->number, tmp);
-	list_add_tail(&p->list, &data1.list);
-	++list_size;
-		
-	return size;
-}
-
-// 用户读overwrite_disck文件，以读取先前写入的字符串 
-static ssize_t proc_overwrite_switch_read(struct file *file,
-		char __user *buf,
-		size_t size,
-		loff_t *ppos)
-{
-	char tmp_buf[100] = "overwrite_disck:";
-	int len = 0;
-	struct data *pos;
-	
-	if(list_size == 0){
-		len=snprintf(tmp_buf, 100, "%s", "Empty.\n");
-		return simple_read_from_buffer(buf, size, ppos, tmp_buf, len);
-	}		
-		
-	list_for_each_entry(pos, &data1.list, list){
-		len = snprintf(tmp_buf, 100, "%s\n%s", tmp_buf, pos->number);
-		printk("len == %d  strlen == %lu\n", len, strlen(tmp_buf));
-	}
-	return simple_read_from_buffer(buf, size, ppos, tmp_buf, len);
-}
-
 // 用户写enable文件，以修改enable参数 
 static ssize_t proc_enable_write(struct file *file,
 		const char __user *buf,
@@ -175,25 +122,42 @@ static ssize_t proc_enable_write(struct file *file,
 			exit_probe();
 		}
 		enable = 0;
-		printk("module disabled. enable == %d\n", enable);
+		printk(KERN_INFO "module disabled. enable == %d\n", enable);
 	} else if(strcmp("1", tmp) == 0) {
 		if (enable == 0) {
 			// local enable
-			start_trace();
+			int ret = start_trace();
+			if (ret < 0) {
+				pr_err("Error: can't register tracepoints, ret=%d.\n", ret);
+				pr_err("Maybe you don't have CONFIG_TRACE_IRQFLAGS enabled in your kernel.\n");
+				return ret;
+			}
 		} else if (enable == 2) {
+			int ret;
 			exit_probe();
 			// local enable
-			start_trace();
+			ret = start_trace();
+			if (ret < 0) {
+				pr_err("Error: can't register tracepoints, ret=%d.\n", ret);
+				pr_err("Maybe you don't have CONFIG_TRACE_IRQFLAGS enabled in your kernel.\n");
+				return ret;
+			}
 		}
 		enable = 1;
-		printk("module enabled. enable == %d\n", enable);
 	} else if(strcmp("2", tmp) == 0) {
 		if (enable == 0) {
-			start_probe();
+			int ret = start_probe();
+			if (ret < 0) {
+				return ret;
+			}
 		} else if (enable == 1) {
+			int ret;
 			// local disable
 			exit_trace();
-			start_probe();
+			ret = start_probe();
+			if (ret < 0) {
+				return ret;
+			}
 		}
 		enable = 2;
 	}
@@ -253,7 +217,7 @@ static ssize_t proc_irq_write(struct file *file,
 		MASK_ID = i;
 	}
 	// irq 变更
-	printk("irq changed. irq == %d\n", MASK_ID);
+	printk(KERN_INFO "irq changed. irq == %d\n", MASK_ID);
 	return size;
 }
 
@@ -301,7 +265,7 @@ static ssize_t proc_latency_write(struct file *file,
 	if (i == 0) return -EINVAL;
 	nsec_limit = i;
 	// latency 变更
-	printk("latency changed. latency == %lld\n", nsec_limit);
+	printk(KERN_INFO "latency changed. latency == %lld\n", nsec_limit);
 	
 	return size;
 }
@@ -343,7 +307,7 @@ static ssize_t proc_process_info_write(struct file *file,
 			exit_probe();
 			start_probe();
 		}
-		printk("process_info cleared.");
+		printk(KERN_INFO "process_info cleared.");
 	} else {
 		return -EINVAL;
 	}
@@ -363,7 +327,7 @@ static ssize_t proc_process_info_read(struct file *file,
     	preempt_disable();
     	for_each_present_cpu(cpu)
     	{
-    	    pr_info("On CPU %u:\n", cpu);
+    	    pr_info("Printing CPU %u:\n", cpu);
     	    // 如果访问的不是当前 CPU，要先看 local_list_mark 的值
     	    if (cpu != smp_processor_id())
     	    {
@@ -376,7 +340,7 @@ static ssize_t proc_process_info_read(struct file *file,
     	        // 如果访问的是当前 CPU 的，不需要用 local_list_mark 保护
     	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
     	    }
-    	    pr_info("----\n");
+    	    pr_info("Print CPU %u finished.\n", cpu);
     	}
     	preempt_enable();
 		return ret;
@@ -387,10 +351,6 @@ static ssize_t proc_process_info_read(struct file *file,
 	return 0;
 }
 
-static struct file_operations s_st_overwrite_switch_fops = {
-	.write = proc_overwrite_switch_write,
-	.read = proc_overwrite_switch_read,
-};
 
 static struct file_operations enable_fops = {
 	.write = proc_enable_write,
@@ -416,65 +376,44 @@ static int __init start_module(void)
 {
 	struct proc_dir_entry *parent_dir;
 	
-    printk(KERN_ALERT "Module init.\n");
-    printk("enable == %d\n", enable);
-    printk("irq == %d\n", MASK_ID);
-    printk("latency == %lld\n", nsec_limit);
-    
-    my_cachep = kmem_cache_create("my_cache", sizeof(struct data), 0, SLAB_HWCACHE_ALIGN, NULL);
-    if(my_cachep == NULL ){
-    	printk("create my_cache failed!\n");
-    	return -ENOMEM;
-	}
+    printk(KERN_INFO "Module init, enable == %d, irq == %d, latency == %lld\n", enable, MASK_ID, nsec_limit);
+
 	// 在/proc下创建 realtime_probe_tool目录 
 	parent_dir = proc_mkdir("realtime_probe_tool", NULL);
 	if(parent_dir == NULL){
-    	printk("create parent_dir failed\n");
+    	printk(KERN_ERR "create parent_dir failed\n");
     	return -ENOMEM;
 	}
-	// 在/proc/realtime_probe_tool下创建5个文件 
-    if(!proc_create("overwrite_disck", 0744, parent_dir, &s_st_overwrite_switch_fops)){
-    	printk("create overwrite_disck failed\n");
-    	return -ENOMEM;
-	}
+	// 在/proc/realtime_probe_tool下创建4个文件
     if(!proc_create("enable", 0744, parent_dir, &enable_fops)) {
-    	printk("create enable failed\n");
+    	printk(KERN_ERR "create enable failed\n");
     	return -ENOMEM;
 	}
     if(!proc_create("latency", 0744, parent_dir, &latency_fops)) {
-    	printk("create latency failed\n");
+    	printk(KERN_ERR "create latency failed\n");
     	return -ENOMEM;
 	}
     if(!proc_create("irq", 0744, parent_dir, &irq_fops)) {
-    	printk("create irq failed\n");
+    	printk(KERN_ERR "create irq failed\n");
     	return -ENOMEM;
 	}
 	if(!proc_create("process_info", 0744, parent_dir, &process_info_fops)) {
-    	printk("create process_info failed\n");
+    	printk(KERN_ERR "create process_info failed\n");
     	return -ENOMEM;
 	}
-    
-	INIT_LIST_HEAD(&data1.list);
+
     return 0;
 }
 
 static void __exit exit_module(void)
 {
-	struct data *pos;
-	struct data *n;
-	// 回收链表 
-	list_for_each_entry_safe(pos, n, &data1.list, list){
-		list_del(&pos->list);
-		kmem_cache_free(my_cachep, pos);
-	}
-	kmem_cache_destroy(my_cachep);
 	remove_proc_subtree("realtime_probe_tool", NULL);
 	if (enable == 1) {
 		exit_trace();
 	} else if (enable == 2) {
 		exit_probe();
 	}
-    printk(KERN_ALERT "Module exit.\n");
+    printk(KERN_INFO "Module exit.\n");
 }
 module_init(start_module);
 module_exit(exit_module);
