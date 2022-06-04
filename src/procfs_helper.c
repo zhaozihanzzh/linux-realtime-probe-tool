@@ -304,8 +304,7 @@ static ssize_t proc_process_info_write(struct file *file,
 			exit_trace();
 			start_trace();
 		} else if (enable == 2) {
-			exit_probe();
-			start_probe();
+			clear_single();
 		}
 		printk(KERN_INFO "process_info cleared.");
 	} else {

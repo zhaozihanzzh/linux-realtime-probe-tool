@@ -4,6 +4,7 @@
 #include <linux/fdtable.h>
 #include <linux/time.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/stacktrace.h>
 #include <linux/tracepoint.h>
 #include <linux/types.h>
@@ -255,7 +256,8 @@ int start_trace(void) {
         // 初始化链表
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu));
         *per_cpu_ptr(&local_tracing, cpu) = false;
-        *per_cpu_ptr(&file_node_cache, cpu) = kmem_cache_create("file_node_cache", sizeof(struct file_node), 0, SLAB_HWCACHE_ALIGN, NULL);
+        *per_cpu_ptr(&file_node_cache, cpu) = kmem_cache_create("file_node_cache", \
+            sizeof(struct file_node), 0, SLAB_HWCACHE_ALIGN, NULL);
     }
     preempt_enable();
     return register_tracepoints(tps, TP_NUM);

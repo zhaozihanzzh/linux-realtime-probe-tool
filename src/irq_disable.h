@@ -7,7 +7,7 @@ extern time64_t nsec_limit;
 // 用于记录进程打开的文件，这里我们没有用内核链表，因为我们对链表所作的操作很简单
 struct file_node
 {
-    char *buffer;
+    char buffer[256];
     char *path;
     struct file_node *next;
 };
