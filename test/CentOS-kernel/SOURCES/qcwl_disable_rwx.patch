@@ -1,0 +1,68 @@
+diff --git a/Makefile b/Makefile
+index efab473..045694e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -361,10 +361,10 @@ HOST_LFS_LIBS := $(shell getconf LFS_LIBS 2>/dev/null)
+ 
+ HOSTCC       = gcc
+ HOSTCXX      = g++
+-KBUILD_HOSTCFLAGS   := -Wall -Wmissing-prototypes -Wstrict-prototypes -O2 \
++KBUILD_HOSTCFLAGS   := -Wall -Wmissing-prototypes -Wstrict-prototypes -O1 \
+ 		-fomit-frame-pointer -std=gnu89 $(HOST_LFS_CFLAGS) \
+ 		$(HOSTCFLAGS)
+-KBUILD_HOSTCXXFLAGS := -O2 $(HOST_LFS_CFLAGS) $(HOSTCXXFLAGS)
++KBUILD_HOSTCXXFLAGS := -O1 $(HOST_LFS_CFLAGS) $(HOSTCXXFLAGS)
+ KBUILD_HOSTLDFLAGS  := $(HOST_LFS_LDFLAGS) $(HOSTLDFLAGS)
+ KBUILD_HOSTLDLIBS   := $(HOST_LFS_LIBS) $(HOSTLDLIBS)
+ 
+@@ -423,7 +423,6 @@ LINUXINCLUDE    := \
+ KBUILD_AFLAGS   := -D__ASSEMBLY__
+ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
+ 		   -fno-strict-aliasing -fno-common -fshort-wchar \
+-		   -Werror-implicit-function-declaration \
+ 		   -Wno-format-security \
+ 		   -std=gnu89
+ KBUILD_CPPFLAGS := -D__KERNEL__
+@@ -668,7 +667,7 @@ else
+ ifeq ($(SRCARCH), powerpc)
+ KBUILD_CFLAGS	+= -O3
+ else
+-KBUILD_CFLAGS	+= -O2
++KBUILD_CFLAGS	+= -O1
+ endif
+ ifdef CONFIG_PROFILE_ALL_BRANCHES
+ KBUILD_CFLAGS	+= $(call cc-disable-warning,maybe-uninitialized,)
+@@ -679,7 +678,7 @@ ifneq ($(DISABLE_WERROR),1)
+ ifneq ($(WITH_GCOV),1)
+ ifeq ($(KBUILD_EXTMOD),)
+ ifneq (,$(filter $(ARCH), x86 x86_64 powerpc s390))
+-KBUILD_CFLAGS   += -Werror
++# KBUILD_CFLAGS   += -Werror
+ endif
+ # powerpc is compiled with -O3. Starting with gcc 4.8, there have been some
+ # known problems with compiler warnings so disable them on all compilers
+@@ -845,19 +844,19 @@ KBUILD_CFLAGS  += $(call cc-option,-fno-stack-check,)
+ KBUILD_CFLAGS   += $(call cc-option,-fconserve-stack)
+ 
+ # disallow errors like 'EXPORT_GPL(foo);' with missing header
+-KBUILD_CFLAGS   += $(call cc-option,-Werror=implicit-int)
++# KBUILD_CFLAGS   += $(call cc-option,-Werror=implicit-int)
+ 
+ # require functions to have arguments in prototypes, not empty 'int foo()'
+-KBUILD_CFLAGS   += $(call cc-option,-Werror=strict-prototypes)
++# KBUILD_CFLAGS   += $(call cc-option,-Werror=strict-prototypes)
+ 
+ # Prohibit date/time macros, which would make the build non-deterministic
+-KBUILD_CFLAGS   += $(call cc-option,-Werror=date-time)
++# KBUILD_CFLAGS   += $(call cc-option,-Werror=date-time)
+ 
+ # enforce correct pointer usage
+-KBUILD_CFLAGS   += $(call cc-option,-Werror=incompatible-pointer-types)
++# KBUILD_CFLAGS   += $(call cc-option,-Werror=incompatible-pointer-types)
+ 
+ # Require designated initializers for all marked structures
+-KBUILD_CFLAGS   += $(call cc-option,-Werror=designated-init)
++# KBUILD_CFLAGS   += $(call cc-option,-Werror=designated-init)
+ 
+ # change __FILE__ to the relative path from the srctree
+ KBUILD_CFLAGS	+= $(call cc-option,-fmacro-prefix-map=$(srctree)/=)
