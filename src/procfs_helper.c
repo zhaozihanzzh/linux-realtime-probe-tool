@@ -17,8 +17,16 @@ int list_size = 0;
 
 // 3个参数：开关、中断号、时长阈值 
 static int enable = 0; // 0 - 关闭（默认）；1 - 全局； 2 - 某一中断号
-time64_t nsec_limit = 1000000; // 以纳秒为单位的关闭时间
-int MASK_ID = 18;
+module_param(enable, int, 0644);
+MODULE_PARM_DESC(enable, "Module on/off");
+int MASK_ID;
+static int irq = 18;
+module_param(irq, int, 0644);
+MODULE_PARM_DESC(irq, "Interrupt number");
+static long latency = 1000000; // 以纳秒为单位的关闭时间
+module_param(latency, long, 0644);
+MODULE_PARM_DESC(latency, "Max lasting time(ns) when interrupt is closed that we can tolerate");
+time64_t nsec_limit;
 
 // 修改自内核函数 simple_read_from_buffer 为固定一个 to，ppos 不再在 from 中浮动，而是在 to 中浮动
 ssize_t simple_read_from_multi_buffer(void __user *to, size_t count, loff_t *ppos,
@@ -374,8 +382,11 @@ static struct file_operations process_info_fops = {
 static int __init start_module(void)
 {
 	struct proc_dir_entry *parent_dir;
-	
-    printk(KERN_INFO "Module init, enable == %d, irq == %d, latency == %lld\n", enable, MASK_ID, nsec_limit);
+	// 检查参数是否合法
+	if (irq < 0) return -EINVAL;
+	if (latency <= 0) return -EINVAL;
+	MASK_ID = irq;
+	nsec_limit = latency;
 
 	// 在/proc下创建 realtime_probe_tool目录 
 	parent_dir = proc_mkdir("realtime_probe_tool", NULL);
@@ -400,7 +411,22 @@ static int __init start_module(void)
     	printk(KERN_ERR "create process_info failed\n");
     	return -ENOMEM;
 	}
-
+	if (enable == 1) {
+		int ret = start_trace();
+		if (ret < 0) {
+			pr_err("Error: can't register tracepoints, ret=%d.\n", ret);
+			pr_err("Maybe you don't have CONFIG_TRACE_IRQFLAGS enabled in your kernel.\n");
+			return ret;
+		}
+	} else if (enable == 2) {
+		int ret = start_probe();
+		if (ret < 0) {
+			return ret;
+		}
+	} else if (enable != 0) {
+		return -EINVAL;
+	}
+	printk(KERN_INFO "Module init, enable == %d, irq == %d, latency == %lld\n", enable, MASK_ID, nsec_limit);
     return 0;
 }
 
