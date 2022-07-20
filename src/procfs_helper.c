@@ -84,7 +84,7 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
 				return curr_count;
 			} else char_count += curr_count;
         }
-        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "Files:\n"));
+        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "File descriptors:\n"));
 		if (curr_count < 0) {
 			pr_warn("Read failed=%ld\n",curr_count);
 			return curr_count;
@@ -335,16 +335,16 @@ static ssize_t proc_process_info_read(struct file *file,
     	for_each_present_cpu(cpu)
     	{
     	    pr_info("Printing CPU %u:\n", cpu);
-    	    // 如果访问的不是当前 CPU，要先看 local_list_mark 的值
+    	    // 如果访问的不是当前 CPU，要先看 local_list_lock 的值
     	    if (cpu != smp_processor_id())
     	    {
-    	        while (!atomic_cmpxchg(per_cpu_ptr(&local_list_mark, cpu), 1, 0)) ;
+				spin_lock_irqsave(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
     	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
-    	        atomic_set(per_cpu_ptr(&local_list_mark, cpu), 1);
+				spin_unlock_irqrestore(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
     	    }
     	    else
     	    {
-    	        // 如果访问的是当前 CPU 的，不需要用 local_list_mark 保护
+    	        // 如果访问的是当前 CPU 的，不需要用 local_list_lock 保护
     	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
     	    }
     	    pr_info("Print CPU %u finished.\n", cpu);

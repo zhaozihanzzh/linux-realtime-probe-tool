@@ -39,7 +39,8 @@ unsigned int length = 0; // 链表长度
 #define LENGTH_LIMIT 20
 
 // 操作链表前先获取
-static atomic_t single_list_mark;
+spinlock_t single_list_lock;
+unsigned long single_irq_flag;
 
 static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
     // 抓取函数的第一个参数（x86_64 把它放在 rdi 寄存器中），即中断号
@@ -76,7 +77,7 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
             struct file_node **next_file;
             // 记录关中断的进程信息
             struct process_info *single_list_node;
-            while (!atomic_cmpxchg(&single_list_mark, 1, 0)) ;
+            spin_lock_irqsave(&single_list_lock, single_irq_flag);
             if (length >= LENGTH_LIMIT) {
                 // 如果链表长度超过上限，删除最老的记录并将其存储空间让给新记录
                 struct list_head *to_delete = single_list_head.list.next;
@@ -117,7 +118,7 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
             INIT_LIST_HEAD(&single_list_node->list);
             list_add_tail(&single_list_node->list, &single_list_head.list);
             ++length;
-            atomic_set(&single_list_mark, 1);
+            spin_unlock_irqrestore(&single_list_lock, single_irq_flag);
         } else {
             kfree(entries);
         }
@@ -127,13 +128,13 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
 }
 
 void clear_single(void) {
-    // 获取“锁”
-    while (!atomic_cmpxchg(&single_list_mark, 1, 0)) ;
+    // 获取锁
+    spin_lock_irqsave(&single_list_lock, single_irq_flag);
     // 释放链表内存，让头结点指向自己，更新长度
     clear(&single_list_head.list, file_node_cache);
     INIT_LIST_HEAD(&single_list_head.list);
     length = 0;
-    atomic_set(&single_list_mark, 1);
+    spin_unlock_irqrestore(&single_list_lock, single_irq_flag);
 }
 
 int start_probe(void) {
@@ -162,7 +163,7 @@ int start_probe(void) {
         pr_err("can't register enable_irq_probe, ret=%d\n", ret);
         return ret;
     }
-    atomic_set(&single_list_mark, 1);
+    spin_lock_init(&single_list_lock);
     pr_info("Start probe IRQ disable.\n");
     return 0;
 }

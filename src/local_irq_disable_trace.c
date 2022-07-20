@@ -131,8 +131,9 @@ DEFINE_PER_CPU(unsigned int, local_list_length) = 0; // 链表长度
 // 缓存
 DEFINE_PER_CPU(struct kmem_cache *, file_node_cache);
 
-// 原子操作，标记是否已在操作链表
-DEFINE_PER_CPU(atomic_t, local_list_mark);
+// 标记是否已在操作链表
+DEFINE_PER_CPU(spinlock_t, local_list_lock);
+DEFINE_PER_CPU(unsigned long, local_irq_flag);
 
 // 标记是否已经在执行回调函数，以忽略掉模块自身执行产生的关中断
 DEFINE_PER_CPU(bool, local_tracing);
@@ -169,8 +170,7 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             struct task_struct *on_irq_task = get_current();
             // 记录关中断的进程信息
             struct process_info *local_list_node;
-            // 这里不可以使用 spin_lock，因为 spin_unlock 时必然会打开抢占，不管在执行 spin_lock 时是否已关闭抢占
-            while (!atomic_cmpxchg(this_cpu_ptr(&local_list_mark), 1, 0)) ;
+            spin_lock_irqsave(this_cpu_ptr(&local_list_lock), *this_cpu_ptr(&local_irq_flag));
             if (likely(*this_cpu_ptr(&local_list_length) >= LENGTH_LIMIT)) {
                 // 如果链表长度超过上限，删除最老的记录并将其存储空间让给新记录
                 // 但是，会不会保留关中断时间最长的更合理？
@@ -225,7 +225,7 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             INIT_LIST_HEAD(&local_list_node->list);
             list_add_tail(&local_list_node->list, this_cpu_ptr(&local_list_head.list));
             ++*this_cpu_ptr(&local_list_length);
-            atomic_set(this_cpu_ptr(&local_list_mark), 1);
+            spin_unlock_irqrestore(this_cpu_ptr(&local_list_lock), *this_cpu_ptr(&local_irq_flag));
             
         }
     }
@@ -252,7 +252,7 @@ int start_trace(void) {
     preempt_disable();
     for_each_present_cpu(cpu)
     {
-        atomic_set(per_cpu_ptr(&local_list_mark, cpu), 1);
+        spin_lock_init(per_cpu_ptr(&local_list_lock, cpu));
         // 初始化链表
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu));
         *per_cpu_ptr(&local_tracing, cpu) = false;
@@ -270,9 +270,9 @@ void exit_trace(void) {
     for_each_present_cpu(cpu)
     {
         // 回收链表
-        while (!atomic_cmpxchg(per_cpu_ptr(&local_list_mark, cpu), 1, 0)) ;
+        spin_lock_irqsave(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
         clear(per_cpu_ptr(&local_list_head.list, cpu), *per_cpu_ptr(&file_node_cache, cpu));
-        atomic_set(per_cpu_ptr(&local_list_mark, cpu), 1);
+        spin_unlock_irqrestore(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
         *per_cpu_ptr(&local_list_length, cpu) = 0;
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu)); // 头结点指向自己
         kmem_cache_destroy(*per_cpu_ptr(&file_node_cache, cpu));
