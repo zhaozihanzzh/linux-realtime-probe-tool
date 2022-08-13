@@ -9,6 +9,7 @@
 
 #include "irq_disable.h"
 #include "procfs_helper.h"
+#include "lock_util.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("QunChuWoLao");
@@ -60,6 +61,7 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
     {
         struct file_node *file_item;
         static char buffer[256];
+		struct pid_array *pid_locks;
         if (pos == NULL)
         {
             continue;
@@ -97,6 +99,62 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
 			} else char_count += curr_count;
             file_item = file_item->next;
         }
+		pid_locks = radix_tree_lookup(&pid_tree, pos->pid);
+		if (pid_locks) {
+			struct lock_info *current_lock_info;
+			curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "Locks call trace:\n"));
+			if (curr_count < 0) {
+				pr_warn("Read failed=%ld\n",curr_count);
+				return curr_count;
+			} else char_count += curr_count;
+			if (pid_locks->ring_index <= MAX_LOCK_STACK_TRACE_DEPTH) {
+				for (i = 0; i < pid_locks->ring_index; ++i) {
+					int j;
+					struct lock_process_stack *lock_node = pid_locks->pid_list[i];
+					curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
+						"Lock address <%p>, stack: \n", (void *)lock_node->lock_addr));
+					if (curr_count < 0) {
+						pr_warn("Read failed=%ld\n",curr_count);
+						return curr_count;
+					} else char_count += curr_count;
+					for (j = 0; j < lock_node->nr_entries; ++j) {
+        			    curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
+							"   [<%p>] %pS\n", (void*)pos->entries[i], (void*)pos->entries[i]));
+						if (curr_count < 0) {
+							pr_warn("Read failed=%ld\n",curr_count);
+							return curr_count;
+						} else char_count += curr_count;
+						hash_for_each_possible(lock_table, current_lock_info, node, lock_node->lock_addr) {
+							struct lock_process_stack *current_process;
+							if (current_lock_info->lock_address != lock_node->lock_addr)
+								continue;
+							for (current_process = current_lock_info->begin; current_process != NULL; current_process = current_process->next) {
+								if (current_process->pid == pos->pid) {
+									continue;
+								}
+								curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
+									"   Lock also held by pid %d, comm %s\n", current_process->pid, current_process->comm));
+								if (curr_count < 0) {
+									pr_warn("Read failed=%ld\n",curr_count);
+									return curr_count;
+								} else char_count += curr_count;
+							}
+						}
+        			}
+
+				}
+			} else {
+				for (i = 0; i < MAX_LOCK_STACK_TRACE_DEPTH; ++i) {
+					curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
+						"   [<%p>] %pS\n", (void*)pid_locks->pid_list[(i + pid_locks->ring_index) % \
+						MAX_LOCK_STACK_TRACE_DEPTH], (void*)pid_locks->pid_list[(i + pid_locks->ring_index) % MAX_LOCK_STACK_TRACE_DEPTH]));
+					if (curr_count < 0) {
+						pr_warn("Read failed=%ld\n",curr_count);
+						return curr_count;
+					} else char_count += curr_count;
+				}
+			}
+        }
         curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "-- End item --\n"));
 		if (curr_count < 0) {
 			pr_warn("Read failed=%ld\n",curr_count);
@@ -125,8 +183,10 @@ static ssize_t proc_enable_write(struct file *file,
 	if(strcmp("0", tmp) == 0){
 		if (enable == 1) {
 			// local disable
+			stop_lock_trace();
 			exit_trace();
 		} else if (enable == 2) {
+			stop_lock_trace();
 			exit_probe();
 		}
 		enable = 0;
@@ -140,14 +200,23 @@ static ssize_t proc_enable_write(struct file *file,
 				pr_err("Maybe you don't have CONFIG_TRACE_IRQFLAGS enabled in your kernel.\n");
 				return ret;
 			}
+			ret = start_lock_trace();
+			if (ret < 0) {
+				return ret;
+			}
 		} else if (enable == 2) {
 			int ret;
+			stop_lock_trace();
 			exit_probe();
 			// local enable
 			ret = start_trace();
 			if (ret < 0) {
 				pr_err("Error: can't register tracepoints, ret=%d.\n", ret);
 				pr_err("Maybe you don't have CONFIG_TRACE_IRQFLAGS enabled in your kernel.\n");
+				return ret;
+			}
+			ret = start_lock_trace();
+			if (ret < 0) {
 				return ret;
 			}
 		}
@@ -158,11 +227,20 @@ static ssize_t proc_enable_write(struct file *file,
 			if (ret < 0) {
 				return ret;
 			}
+			ret = start_lock_trace();
+			if (ret < 0) {
+				return ret;
+			}
 		} else if (enable == 1) {
 			int ret;
 			// local disable
+			stop_lock_trace();
 			exit_trace();
 			ret = start_probe();
+			if (ret < 0) {
+				return ret;
+			}
+			ret = start_lock_trace();
 			if (ret < 0) {
 				return ret;
 			}
@@ -309,10 +387,14 @@ static ssize_t proc_process_info_write(struct file *file,
 	if(strcmp("0", tmp) == 0) {
 		if (enable == 1) {
 			// clear global
+			stop_lock_trace();
 			exit_trace();
 			start_trace();
+			start_lock_trace();
 		} else if (enable == 2) {
+			stop_lock_trace();
 			clear_single();
+			start_lock_trace();
 		}
 		printk(KERN_INFO "process_info cleared.");
 	} else {
@@ -332,24 +414,40 @@ static ssize_t proc_process_info_read(struct file *file,
     	unsigned int cpu;
 		ssize_t ret = 0;
     	preempt_disable();
+		// 临时禁止记录锁
+		for_each_present_cpu(cpu)
+		{
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
+		}
     	for_each_present_cpu(cpu)
     	{
     	    pr_info("Printing CPU %u:\n", cpu);
-    	    // 如果访问的不是当前 CPU，要先看 local_list_lock 的值
+    	    // 如果访问的不是当前 CPU，要先看 local_list_mark 的值
     	    if (cpu != smp_processor_id())
     	    {
-				spin_lock_irqsave(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
+				spin_lock_irqsave(per_cpu_ptr(&local_list_mark, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
     	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
-				spin_unlock_irqrestore(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
+				spin_unlock_irqrestore(per_cpu_ptr(&local_list_mark, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
+
     	    }
     	    else
     	    {
-    	        // 如果访问的是当前 CPU 的，不需要用 local_list_lock 保护
+    	        // 如果访问的是当前 CPU 的，不需要用 local_list_mark 保护
     	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
     	    }
     	    pr_info("Print CPU %u finished.\n", cpu);
     	}
     	preempt_enable();
+		for_each_present_cpu(cpu)
+		{
+			atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+		}
 		return ret;
 	}
 	if (enable == 2) {
@@ -418,8 +516,16 @@ static int __init start_module(void)
 			pr_err("Maybe you don't have CONFIG_TRACE_IRQFLAGS enabled in your kernel.\n");
 			return ret;
 		}
+		ret = start_lock_trace();
+		if (ret < 0) {
+			return ret;
+		}
 	} else if (enable == 2) {
 		int ret = start_probe();
+		if (ret < 0) {
+			return ret;
+		}
+		ret = start_lock_trace();
 		if (ret < 0) {
 			return ret;
 		}
@@ -434,8 +540,10 @@ static void __exit exit_module(void)
 {
 	remove_proc_subtree("realtime_probe_tool", NULL);
 	if (enable == 1) {
+		stop_lock_trace();
 		exit_trace();
 	} else if (enable == 2) {
+		stop_lock_trace();
 		exit_probe();
 	}
     printk(KERN_INFO "Module exit.\n");
