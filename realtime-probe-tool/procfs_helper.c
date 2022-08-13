@@ -425,17 +425,17 @@ static ssize_t proc_process_info_read(struct file *file,
     	for_each_present_cpu(cpu)
     	{
     	    pr_info("Printing CPU %u:\n", cpu);
-    	    // 如果访问的不是当前 CPU，要先看 local_list_mark 的值
+    	    // 如果访问的不是当前 CPU，要先看 local_list_lock 的值
     	    if (cpu != smp_processor_id())
     	    {
-				spin_lock_irqsave(per_cpu_ptr(&local_list_mark, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
+				spin_lock_irqsave(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
     	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
-				spin_unlock_irqrestore(per_cpu_ptr(&local_list_mark, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
+				spin_unlock_irqrestore(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
 
     	    }
     	    else
     	    {
-    	        // 如果访问的是当前 CPU 的，不需要用 local_list_mark 保护
+    	        // 如果访问的是当前 CPU 的，不需要用 local_list_lock 保护
     	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
     	    }
     	    pr_info("Print CPU %u finished.\n", cpu);

@@ -170,7 +170,12 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             struct task_struct *on_irq_task = get_current();
             // 记录关中断的进程信息
             struct process_info *local_list_node;
-            spin_lock_irqsave(this_cpu_ptr(&local_list_lock), *this_cpu_ptr(&local_irq_flag));
+            if (!spin_trylock_irqsave(this_cpu_ptr(&local_list_lock), *this_cpu_ptr(&local_irq_flag))) {
+                // 如果已经持有锁，直接不记录（此时可能正在查看信息）
+                *this_cpu_ptr(&has_off_record) = false;
+                *this_cpu_ptr(&local_tracing) = false;
+                return;
+            }
             if (likely(*this_cpu_ptr(&local_list_length) >= LENGTH_LIMIT)) {
                 // 如果链表长度超过上限，删除最老的记录并将其存储空间让给新记录
                 // 但是，会不会保留关中断时间最长的更合理？
