@@ -9,16 +9,6 @@
 #include <linux/list.h>
 
 #include "irq_disable.h"
-// 抓取单一中断的关闭
-static struct kprobe disable_irq_nosync_probe = {
-    .symbol_name = "disable_irq_nosync"
-};
-static struct kprobe disable_irq_probe = {
-    .symbol_name = "disable_irq"
-};
-static struct kprobe enable_irq_probe = {
-    .symbol_name = "enable_irq"
-};
 
 static struct timespec64 close_time; // 关闭的时间
 
@@ -42,6 +32,7 @@ unsigned int length = 0; // 链表长度
 spinlock_t single_list_lock;
 unsigned long single_irq_flag;
 
+static struct kprobe* probe_irqs[3] = {NULL, NULL, NULL};
 static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
     // 抓取函数的第一个参数（x86_64 把它放在 rdi 寄存器中），即中断号
     if (regs->di != MASK_ID) {
@@ -139,28 +130,40 @@ void clear_single(void) {
 
 int start_probe(void) {
     int ret;
+    struct kprobe *disable_irq_nosync_probe, *disable_irq_probe, *enable_irq_probe;
     file_node_cache = kmem_cache_create("file_node_cache", sizeof(struct file_node), 0, SLAB_HWCACHE_ALIGN, NULL);
     if(file_node_cache == NULL) {
         pr_err("create file_node_cache failed!\n");
         return -ENOMEM;
 	}
-    disable_irq_nosync_probe.pre_handler = pre_handler_disable_irq;
-    disable_irq_probe.pre_handler = pre_handler_disable_irq;
-    enable_irq_probe.pre_handler = pre_handler_enable_irq;
-    
-    ret = register_kprobe(&disable_irq_nosync_probe);
-    if (ret < 0) {
-        pr_err("can't register disable_irq_nosync_probe, ret=%d\n", ret);
-        return ret;
+
+    // 抓取单一中断的关闭
+    disable_irq_nosync_probe = kzalloc(sizeof(struct kprobe), GFP_ATOMIC);
+    disable_irq_probe = kzalloc(sizeof(struct kprobe), GFP_ATOMIC);
+    enable_irq_probe = kzalloc(sizeof(struct kprobe), GFP_ATOMIC);
+    if (!disable_irq_nosync_probe || !disable_irq_probe || !enable_irq_probe) {
+        kfree(disable_irq_nosync_probe);
+        kfree(disable_irq_probe);
+        kfree(enable_irq_probe);
+        return -ENOMEM;
     }
-    ret = register_kprobe(&disable_irq_probe);
+    disable_irq_nosync_probe->symbol_name = "disable_irq_nosync";
+    disable_irq_nosync_probe->pre_handler = pre_handler_disable_irq;
+    disable_irq_probe->symbol_name = "disable_irq";
+    disable_irq_probe->pre_handler = pre_handler_disable_irq;
+    enable_irq_probe->symbol_name = "enable_irq";
+    enable_irq_probe->pre_handler = pre_handler_enable_irq;
+    probe_irqs[0] = disable_irq_nosync_probe;
+    probe_irqs[1] = disable_irq_probe;
+    probe_irqs[2] = enable_irq_probe;
+    ret = register_kprobes(probe_irqs, 3);
     if (ret < 0) {
-        pr_err("can't register disable_irq_probe, ret=%d\n", ret);
-        return ret;
-    }
-    ret = register_kprobe(&enable_irq_probe);
-    if (ret < 0) {
-        pr_err("can't register enable_irq_probe, ret=%d\n", ret);
+        int i;
+        for (i = 0; i < 3; ++i) {
+            kfree(probe_irqs[i]);
+            probe_irqs[i] = NULL;
+        }
+        pr_err("can't register probe_irqs, ret=%d\n", ret);
         return ret;
     }
     spin_lock_init(&single_list_lock);
@@ -168,13 +171,13 @@ int start_probe(void) {
     return 0;
 }
 void exit_probe(void) {
-    unregister_kprobe(&disable_irq_nosync_probe);
-    unregister_kprobe(&disable_irq_probe);
-    unregister_kprobe(&enable_irq_probe);
-    if (length == 0)
-    {
-        pr_info("No IRQ disable traced.\n");
+    int i;
+    unregister_kprobes(probe_irqs, 3);
+    for (i = 0; i < 3; ++i) {
+        kfree(probe_irqs[i]);
+        probe_irqs[i] = NULL;
     }
+
     clear(&single_list_head.list, file_node_cache);
     INIT_LIST_HEAD(&single_list_head.list); // 头结点指向自己
     kmem_cache_destroy(file_node_cache);

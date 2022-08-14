@@ -140,7 +140,7 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
 								} else char_count += curr_count;
 							}
 						}
-        			}
+					}
 
 				}
 			} else {
@@ -202,6 +202,7 @@ static ssize_t proc_enable_write(struct file *file,
 			}
 			ret = start_lock_trace();
 			if (ret < 0) {
+				exit_trace();
 				return ret;
 			}
 		} else if (enable == 2) {
@@ -213,10 +214,13 @@ static ssize_t proc_enable_write(struct file *file,
 			if (ret < 0) {
 				pr_err("Error: can't register tracepoints, ret=%d.\n", ret);
 				pr_err("Maybe you don't have CONFIG_TRACE_IRQFLAGS enabled in your kernel.\n");
+				enable = 0;
 				return ret;
 			}
 			ret = start_lock_trace();
 			if (ret < 0) {
+				exit_trace();
+				enable = 0;
 				return ret;
 			}
 		}
@@ -229,6 +233,7 @@ static ssize_t proc_enable_write(struct file *file,
 			}
 			ret = start_lock_trace();
 			if (ret < 0) {
+				exit_probe();
 				return ret;
 			}
 		} else if (enable == 1) {
@@ -238,10 +243,13 @@ static ssize_t proc_enable_write(struct file *file,
 			exit_trace();
 			ret = start_probe();
 			if (ret < 0) {
+				enable = 0;
 				return ret;
 			}
 			ret = start_lock_trace();
 			if (ret < 0) {
+				enable = 0;
+				exit_probe();
 				return ret;
 			}
 		}
@@ -296,9 +304,11 @@ static ssize_t proc_irq_write(struct file *file,
 	}
 	if (MASK_ID != i && enable == 2) {
 		// 此时追踪的中断号已经变化，需要清除原有链表再重新开始
+		stop_lock_trace();
 		exit_probe();
 		MASK_ID = i;
 		start_probe();
+		start_lock_trace();
 	} else {
 		MASK_ID = i;
 	}
@@ -518,6 +528,7 @@ static int __init start_module(void)
 		}
 		ret = start_lock_trace();
 		if (ret < 0) {
+			exit_trace();
 			return ret;
 		}
 	} else if (enable == 2) {
@@ -527,6 +538,7 @@ static int __init start_module(void)
 		}
 		ret = start_lock_trace();
 		if (ret < 0) {
+			exit_probe();
 			return ret;
 		}
 	} else if (enable != 0) {

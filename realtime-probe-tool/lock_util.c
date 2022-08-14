@@ -2,7 +2,6 @@
 #include <linux/kprobes.h>
 #include <linux/stacktrace.h>
 #include <linux/string.h>
-// #include <linux/spinlock_api_smp.h>
 #include <asm/atomic.h>
 
 #include "lock_util.h"
@@ -14,6 +13,7 @@ DEFINE_PER_CPU(atomic_t, in_prober[4]); // 如果 spin_lock 追踪时触发了 s
 
 RADIX_TREE(pid_tree, GFP_ATOMIC);
 
+static struct kprobe* probe_locks[4] = {NULL, NULL, NULL, NULL};
 
 /** 对不同的锁分开记录，直接使用不同的哈希表，增强并发能力
  *@param 还没写完
@@ -236,27 +236,11 @@ static int pre_handler_spin_lock_bh(struct kprobe *p, struct pt_regs *regs) {
     local_irq_restore(irq_flags);
     return 0;
 }
-static struct kprobe probe_spin_lock_irqsave = {
-    .symbol_name = "_raw_spin_lock_irqsave",
-    .pre_handler = pre_handler_spin_lock_irqsave
-};
-static struct kprobe probe_spin_lock = {
-    .symbol_name = "_raw_spin_lock",
-    .pre_handler = pre_handler_spin_lock
-};
-static struct kprobe probe_spin_lock_irq = {
-    .symbol_name = "_raw_spin_lock_irq",
-    .pre_handler = pre_handler_spin_lock_irq
-};
-static struct kprobe probe_spin_lock_bh = {
-    .symbol_name = "_raw_spin_lock_bh",
-    .pre_handler = pre_handler_spin_lock_bh
-};
-static struct kprobe* probe_locks[] = {&probe_spin_lock_irqsave, &probe_spin_lock, &probe_spin_lock_irq, &probe_spin_lock_bh};
 
 int start_lock_trace(void)
 {
     int ret, cpu;
+    struct kprobe *probe_spin_lock_irqsave, *probe_spin_lock, *probe_spin_lock_irq, *probe_spin_lock_bh;
     spin_lock_init(&table_lock);
     // hash_init(lock_table);//这行没必要,重复了;在重新建立时才有必要
     for_each_present_cpu(cpu) {
@@ -265,18 +249,49 @@ int start_lock_trace(void)
         atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0);
         atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0);
     }
-    pr_info("Init module.\n");
+    // 由于某些原因，最好动态分配 KProbe 结构体，否则 unregister 后无法 re-register
+    // 见：https://lore.kernel.org/all/20210114092525.5a2e78b404602fa82d6d6353@kernel.org/
+    // https://stackoverflow.com/questions/46498699/register-kprobe-returns-einval-without-additional-memory-on-containing-struct
+    probe_spin_lock_irqsave = kzalloc(sizeof(struct kprobe), GFP_ATOMIC);
+    probe_spin_lock = kzalloc(sizeof(struct kprobe), GFP_ATOMIC);
+    probe_spin_lock_irq = kzalloc(sizeof(struct kprobe), GFP_ATOMIC);
+    probe_spin_lock_bh = kzalloc(sizeof(struct kprobe), GFP_ATOMIC);
+    if (!probe_spin_lock_irqsave || !probe_spin_lock || !probe_spin_lock_irq || !probe_spin_lock_bh) {
+        kfree(probe_spin_lock_irqsave);
+        kfree(probe_spin_lock);
+        kfree(probe_spin_lock_irq);
+        kfree(probe_spin_lock_bh);
+        return -ENOMEM;
+    }
+    probe_spin_lock_irqsave->symbol_name = "_raw_spin_lock_irqsave";
+    probe_spin_lock_irqsave->pre_handler = pre_handler_spin_lock_irqsave;
+    probe_spin_lock->symbol_name = "_raw_spin_lock";
+    probe_spin_lock->pre_handler = pre_handler_spin_lock;
+    probe_spin_lock_irq->symbol_name = "_raw_spin_lock_irq";
+    probe_spin_lock_irq->pre_handler = pre_handler_spin_lock_irq;
+    probe_spin_lock_bh->symbol_name = "_raw_spin_lock_bh";
+    probe_spin_lock_bh->pre_handler = pre_handler_spin_lock_bh;
+
+    probe_locks[0] = probe_spin_lock_irqsave;
+    probe_locks[1] = probe_spin_lock;
+    probe_locks[2] = probe_spin_lock_irq;
+    probe_locks[3] = probe_spin_lock_bh;
     ret = register_kprobes(probe_locks, 4);
     if (ret < 0) {
-        pr_err("Can't register probe_spin_lock_irqsave, ret=%d\n", ret);
+        int i;
+        for (i = 0; i < 4; ++i) {
+            kfree(probe_locks[i]);
+            probe_locks[i] = NULL;
+        }
+        pr_err("Can't register probe_locks, ret=%d\n", ret);
         return ret;
     }
-    pr_info("Registered probe_spin_lock_irqsave.\n");
+    pr_info("Registered probe_locks.\n");
     return 0;
 }
 void stop_lock_trace(void)
 {
-    int cpu;
+    int cpu, i;
     struct lock_info *current_lock_info;
     struct hlist_node *tmp;
     void __rcu **slot;
@@ -284,6 +299,10 @@ void stop_lock_trace(void)
     unsigned long bkt;
     pr_info("Prepare to unregister.\n");
     unregister_kprobes(probe_locks, 4);
+    for (i = 0; i < 4; ++i) {
+        kfree(probe_locks[i]);
+        probe_locks[i] = NULL;
+    }
     for_each_present_cpu(cpu) {
         pr_info("CPU %d in_prober[0]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[0], cpu)));
         atomic_set(per_cpu_ptr(&in_prober[0], cpu), 1);
