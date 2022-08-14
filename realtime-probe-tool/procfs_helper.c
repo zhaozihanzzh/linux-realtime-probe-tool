@@ -107,8 +107,16 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
 				pr_warn("Read failed=%ld\n",curr_count);
 				return curr_count;
 			} else char_count += curr_count;
-			if (pid_locks->ring_index <= MAX_LOCK_STACK_TRACE_DEPTH) {
-				for (i = 0; i < pid_locks->ring_index; ++i) {
+			if (pid_locks->ring_index != 0) {
+				int len;
+				if (pid_locks->ring_index <= MAX_LOCK_STACK_TRACE_DEPTH) {
+					i = 0;
+					len = pid_locks->ring_index;
+				} else {
+					i = pid_locks->ring_index % MAX_LOCK_STACK_TRACE_DEPTH;
+					len = MAX_LOCK_STACK_TRACE_DEPTH;
+				}
+				while (len-- > 0) {
 					int j;
 					struct lock_process_stack *lock_node = pid_locks->pid_list[i];
 					curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
@@ -119,39 +127,29 @@ ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t
 					} else char_count += curr_count;
 					for (j = 0; j < lock_node->nr_entries; ++j) {
         			    curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-							"   [<%p>] %pS\n", (void*)pos->entries[i], (void*)pos->entries[i]));
+							"   [<%p>] %pS\n", (void*)lock_node->entries[j], (void*)lock_node->entries[j]));
 						if (curr_count < 0) {
 							pr_warn("Read failed=%ld\n",curr_count);
 							return curr_count;
 						} else char_count += curr_count;
-						hash_for_each_possible(lock_table, current_lock_info, node, lock_node->lock_addr) {
-							struct lock_process_stack *current_process;
-							if (current_lock_info->lock_address != lock_node->lock_addr)
+        			}
+					hash_for_each_possible(lock_table, current_lock_info, node, lock_node->lock_addr) {
+						struct lock_process_stack *current_process;
+						if (current_lock_info->lock_address != lock_node->lock_addr)
+							continue;
+						for (current_process = current_lock_info->begin; current_process != NULL; current_process = current_process->next) {
+							if (current_process->pid == pos->pid) {
 								continue;
-							for (current_process = current_lock_info->begin; current_process != NULL; current_process = current_process->next) {
-								if (current_process->pid == pos->pid) {
-									continue;
-								}
-								curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-									"   Lock also held by pid %d, comm %s\n", current_process->pid, current_process->comm));
-								if (curr_count < 0) {
-									pr_warn("Read failed=%ld\n",curr_count);
-									return curr_count;
-								} else char_count += curr_count;
 							}
+							curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
+								"   Lock also held by pid %d, comm %s\n", current_process->pid, current_process->comm));
+							if (curr_count < 0) {
+								pr_warn("Read failed=%ld\n",curr_count);
+								return curr_count;
+							} else char_count += curr_count;
 						}
 					}
-
-				}
-			} else {
-				for (i = 0; i < MAX_LOCK_STACK_TRACE_DEPTH; ++i) {
-					curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-						"   [<%p>] %pS\n", (void*)pid_locks->pid_list[(i + pid_locks->ring_index) % \
-						MAX_LOCK_STACK_TRACE_DEPTH], (void*)pid_locks->pid_list[(i + pid_locks->ring_index) % MAX_LOCK_STACK_TRACE_DEPTH]));
-					if (curr_count < 0) {
-						pr_warn("Read failed=%ld\n",curr_count);
-						return curr_count;
-					} else char_count += curr_count;
+					i = (i + 1) % MAX_LOCK_STACK_TRACE_DEPTH;
 				}
 			}
         }
@@ -419,10 +417,10 @@ static ssize_t proc_process_info_read(struct file *file,
 		size_t size,
 		loff_t *ppos)
 {
+	ssize_t ret = 0;
+    unsigned int cpu;
 	if (*ppos) return 0;
 	if (enable == 1) {
-    	unsigned int cpu;
-		ssize_t ret = 0;
     	preempt_disable();
 		// 临时禁止记录锁
 		for_each_present_cpu(cpu)
@@ -461,7 +459,22 @@ static ssize_t proc_process_info_read(struct file *file,
 		return ret;
 	}
 	if (enable == 2) {
-		return print_list(&single_list_head.list, buf, size, ppos);
+		for_each_present_cpu(cpu)
+		{
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
+			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
+		}
+		ret += print_list(&single_list_head.list, buf, size, ppos);
+		for_each_present_cpu(cpu)
+		{
+			atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+		}
+		return ret;
 	}
 	return 0;
 }
