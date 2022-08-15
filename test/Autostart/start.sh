@@ -1,6 +1,5 @@
 #!/bin/bash
 
-$(rmmod realtime_probe)
 while read -r line
 do
   params="$params $line"

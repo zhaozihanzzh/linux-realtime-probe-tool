@@ -1,0 +1,10 @@
+[Unit]
+Description=realtime_probe
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/libexec/realtime_probe/start.sh
+ExecReload=/bin/bash /usr/libexec/realtime_probe/restart.sh
+ExecStop=/sbin/rmmod realtime_probe
+[Install]
+WantedBy=multi-user.target
