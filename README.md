@@ -1,5 +1,12 @@
 # Proj154 - Linux 内核实时性分析
 
+## 决赛文档
+[docx](records/final-contest.docx)
+
+## 决赛演示
+
+链接: https://pan.baidu.com/s/1SUSBHMowotAiPzYQ6eTUYw 提取码: zzek 
+
 ## 初赛文档
 
 [docx](records/preliminary-contest.docx)
