@@ -19,26 +19,7 @@ ProcessInfoWidget::ProcessInfoWidget(QWidget *parent) :
 {
     ui->setupUi(this);
 
-    int fd = open("/proc/realtime_probe_tool/process_info",O_RDONLY);
-    if(fd==-1) {
-        puts("open failed");
-    }
-   read(fd, buf, MAXN);
-
-    this->currPage=1;
-    this->maxPage=20;
-
-    this->info=buf;
-    this->infoList=info.split("-- End item --\n");
-    this->infoList.removeLast();
-    this->initialInfoList=infoList;
-    this->maxPage=infoList.size();
-    ui->lineEdit->setText(QString::number(currPage));
-    if(!info.isEmpty()) {        
-        ui->textBrowser->setText(infoList.at(0));
-    } else {
-        ui->textBrowser->setText("没有数据！");
-    }
+    this->setInfo();
     // 上一页
     connect(ui->pushButton_1,&QPushButton::clicked,[=](){
         if(currPage > 1) {
@@ -80,6 +61,7 @@ ProcessInfoWidget::ProcessInfoWidget(QWidget *parent) :
                     infoList.append(initialInfoList.at(page-1));
                 }
             }
+            ui->label_5->setText(QString("共 ")+QString::number(infoList.size())+QString(" 条记录"));
             if(!infoList.isEmpty()) {
                 this->currPage=1;
                 this->maxPage=infoList.size();
@@ -95,13 +77,7 @@ ProcessInfoWidget::ProcessInfoWidget(QWidget *parent) :
     });
 
     // 取消筛选
-    connect(ui->pushButton_6,&QPushButton::clicked,[=](){
-        this->infoList=this->initialInfoList;
-        this->currPage=1;
-        this->maxPage=this->infoList.size();
-        ui->lineEdit->setText(QString::number(currPage));
-        ui->textBrowser->setText(infoList.at(0));
-    });
+    connect(ui->pushButton_6,&QPushButton::clicked,this,&ProcessInfoWidget::cancelFilter);
 
     // pid筛选
     connect(ui->pushButton_7,&QPushButton::clicked,[=](){
@@ -117,6 +93,7 @@ ProcessInfoWidget::ProcessInfoWidget(QWidget *parent) :
                     infoList.append(initialInfoList.at(page-1));
                 }
             }
+            ui->label_5->setText(QString("共 ")+QString::number(infoList.size())+QString(" 条记录"));
             if(!infoList.isEmpty()) {
                 this->currPage=1;
                 this->maxPage=infoList.size();
@@ -132,13 +109,7 @@ ProcessInfoWidget::ProcessInfoWidget(QWidget *parent) :
     });
 
     // 取消筛选
-    connect(ui->pushButton_8,&QPushButton::clicked,[=](){
-        this->infoList=this->initialInfoList;
-        this->currPage=1;
-        this->maxPage=this->infoList.size();
-        ui->lineEdit->setText(QString::number(currPage));
-        ui->textBrowser->setText(infoList.at(0));
-    });
+    connect(ui->pushButton_8,&QPushButton::clicked,this,&ProcessInfoWidget::cancelFilter);
     // 按关中断时长降序排列
     connect(ui->pushButton_9,&QPushButton::clicked,[=](){
         if(infoList.isEmpty()) {
@@ -150,10 +121,49 @@ ProcessInfoWidget::ProcessInfoWidget(QWidget *parent) :
             ui->textBrowser->setText(infoList.at(0));
         }
     });
+    // 刷新进程信息
+    connect(ui->pushButton_10,&QPushButton::clicked,this,&ProcessInfoWidget::setInfo);
 
 }
 
 ProcessInfoWidget::~ProcessInfoWidget()
 {
     delete ui;
+}
+
+void ProcessInfoWidget::setInfo()
+{
+    int fd = open("/proc/realtime_probe_tool/process_info",O_RDONLY);
+    if(fd==-1) {
+        puts("open failed");
+    }
+   read(fd, buf, MAXN);
+
+    this->currPage=1;
+    this->info=buf;
+    this->infoList=info.split("-- End item --\n");
+    this->infoList.removeLast();
+    this->initialInfoList=infoList;
+    this->maxPage=infoList.size();
+    ui->lineEdit->setText(QString::number(currPage));
+    ui->label_5->setText(QString("共 ")+QString::number(infoList.size())+QString(" 条记录"));
+    if(!info.isEmpty()) {
+        ui->textBrowser->setText(infoList.at(0));
+    } else {
+        ui->textBrowser->setText("没有数据！");
+    }
+}
+
+void ProcessInfoWidget::cancelFilter()
+{
+    this->infoList=this->initialInfoList;
+    this->currPage=1;
+    this->maxPage=this->infoList.size();
+    ui->lineEdit->setText(QString::number(currPage));
+    ui->label_5->setText(QString("共 ")+QString::number(infoList.size())+QString(" 条记录"));
+    if(!infoList.isEmpty()) {
+        ui->textBrowser->setText(infoList.at(0));
+    } else {
+        ui->textBrowser->setText("没有数据！");
+    }
 }
