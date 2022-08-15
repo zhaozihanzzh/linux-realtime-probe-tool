@@ -10,9 +10,6 @@
 #include<fcntl.h>
 #include<algorithm>
 
-const int MAXN=1e6;
-char buf[MAXN];
-
 ProcessInfoWidget::ProcessInfoWidget(QWidget *parent) :
     QWidget(parent),
     ui(new Ui::ProcessInfoWidget)
@@ -133,14 +130,13 @@ ProcessInfoWidget::~ProcessInfoWidget()
 
 void ProcessInfoWidget::setInfo()
 {
-    int fd = open("/proc/realtime_probe_tool/process_info",O_RDONLY);
-    if(fd==-1) {
-        puts("open failed");
-    }
-   read(fd, buf, MAXN);
+    QFile file;
+    file.setFileName("/proc/realtime_probe_tool/process_info");
+    file.open(QIODevice::ReadOnly);
+    info=file.readAll();
+    file.close();
 
-    this->currPage=1;
-    this->info=buf;
+    this->currPage=1;    
     this->infoList=info.split("-- End item --\n");
     this->infoList.removeLast();
     this->initialInfoList=infoList;
