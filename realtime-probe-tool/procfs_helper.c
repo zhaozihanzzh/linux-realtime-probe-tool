@@ -4,6 +4,7 @@
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/list.h>
 
@@ -29,137 +30,71 @@ module_param(latency, long, 0644);
 MODULE_PARM_DESC(latency, "Max lasting time(ns) when interrupt is closed that we can tolerate");
 time64_t nsec_limit;
 
-// 修改自内核函数 simple_read_from_buffer 为固定一个 to，ppos 不再在 from 中浮动，而是在 to 中浮动
-ssize_t simple_read_from_multi_buffer(void __user *to, size_t count, loff_t *ppos,
-				const void *from, size_t available)
-{
-	loff_t pos = *ppos;
-	size_t ret;
+// 记录输出 process_info 时当前的 CPU 序号
+static int cpu_in_process_info;
 
-	if (pos < 0)
-		return -EINVAL;
-	if (pos >= count || !count)
-		return 0;
-	count -= pos; // to 中当前剩余的
-	if (count > available)
-		count = available;
-	ret = copy_to_user(to + pos, from, count);
-	if (ret == count)
-		return -EFAULT;
-	count -= ret;
-	*ppos = pos + count;
-	return count;
-}
-
-// 输出至 procfs
-ssize_t print_list(struct list_head *head, char __user *buf, size_t size, loff_t *ppos)
+// 输出到 seq_file
+void print_list(struct list_head *head, struct seq_file *m)
 {
     unsigned int i;
-	ssize_t char_count = 0, curr_count = 0;
     struct process_info *pos;
-    list_for_each_entry(pos, head, list)
+	pos = list_entry(head, struct process_info, list);
+    struct file_node *file_item;
+	struct pid_array *pid_locks;
+    if (pos == NULL)
     {
-        struct file_node *file_item;
-        static char buffer[256];
-		struct pid_array *pid_locks;
-        if (pos == NULL)
-        {
-            continue;
-        }
-        file_item = pos->files_list;
-        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-			"IRQ disabled %lldns on cpu %u by pid %d, comm %s\n", (long long)pos->duration, pos->cpu, pos->pid, pos->comm));
-		if (curr_count < 0) {
-			pr_warn("Read failed=%ld\n",curr_count);
-			return curr_count;
-		} else char_count += curr_count;
-        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "Backtrace:\n"));
-        if (curr_count < 0) {
-			pr_warn("Read failed=%ld\n",curr_count);
-			return curr_count;
-		} else char_count += curr_count;
-		for (i = 0; i < pos->nr_entries; ++i) {
-            curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-				"   [<%p>] %pS\n", (void*)pos->entries[i], (void*)pos->entries[i]));
-			if (curr_count < 0) {
-				pr_warn("Read failed=%ld\n",curr_count);
-				return curr_count;
-			} else char_count += curr_count;
-        }
-        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "File descriptors:\n"));
-		if (curr_count < 0) {
-			pr_warn("Read failed=%ld\n",curr_count);
-			return curr_count;
-		} else char_count += curr_count;
-        while (file_item != NULL) {
-            curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "   %s\n", file_item->path));
-			if (curr_count < 0) {
-				pr_warn("Read failed=%ld\n",curr_count);
-				return curr_count;
-			} else char_count += curr_count;
-            file_item = file_item->next;
-        }
-		pid_locks = radix_tree_lookup(&pid_tree, pos->pid);
-		if (pid_locks) {
-			struct lock_info *current_lock_info;
-			curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "Locks call trace:\n"));
-			if (curr_count < 0) {
-				pr_warn("Read failed=%ld\n",curr_count);
-				return curr_count;
-			} else char_count += curr_count;
-			if (pid_locks->ring_index != 0) {
-				int len;
-				if (pid_locks->ring_index <= MAX_LOCK_STACK_TRACE_DEPTH) {
-					i = 0;
-					len = pid_locks->ring_index;
-				} else {
-					i = pid_locks->ring_index % MAX_LOCK_STACK_TRACE_DEPTH;
-					len = MAX_LOCK_STACK_TRACE_DEPTH;
-				}
-				while (len-- > 0) {
-					int j;
-					struct lock_process_stack *lock_node = pid_locks->pid_list[i];
-					curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-						"Lock address <%p>, stack: \n", (void *)lock_node->lock_addr));
-					if (curr_count < 0) {
-						pr_warn("Read failed=%ld\n",curr_count);
-						return curr_count;
-					} else char_count += curr_count;
-					for (j = 0; j < lock_node->nr_entries; ++j) {
-        			    curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-							"   [<%p>] %pS\n", (void*)lock_node->entries[j], (void*)lock_node->entries[j]));
-						if (curr_count < 0) {
-							pr_warn("Read failed=%ld\n",curr_count);
-							return curr_count;
-						} else char_count += curr_count;
-        			}
-					hash_for_each_possible(lock_table, current_lock_info, node, lock_node->lock_addr) {
-						struct lock_process_stack *current_process;
-						if (current_lock_info->lock_address != lock_node->lock_addr)
-							continue;
-						for (current_process = current_lock_info->begin; current_process != NULL; current_process = current_process->next) {
-							if (current_process->pid == pos->pid) {
-								continue;
-							}
-							curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, \
-								"   Lock also held by pid %d, comm %s\n", current_process->pid, current_process->comm));
-							if (curr_count < 0) {
-								pr_warn("Read failed=%ld\n",curr_count);
-								return curr_count;
-							} else char_count += curr_count;
-						}
-					}
-					i = (i + 1) % MAX_LOCK_STACK_TRACE_DEPTH;
-				}
-			}
-        }
-        curr_count = simple_read_from_multi_buffer(buf, size, ppos, buffer, snprintf(buffer, 256, "-- End item --\n"));
-		if (curr_count < 0) {
-			pr_warn("Read failed=%ld\n",curr_count);
-			return curr_count;
-		} else char_count += curr_count;
+		pr_info("pos is null!\n");
+		return;
     }
-    return char_count;
+    file_item = pos->files_list;
+	seq_printf(m, "IRQ disabled %lldns on cpu %u by pid %d, comm %s\n", (long long)pos->duration, pos->cpu, pos->pid, pos->comm);
+	seq_printf(m, "Backtrace:\n");
+	for (i = 0; i < pos->nr_entries; ++i) {
+		seq_printf(m, "   [<%p>] %pS\n", (void*)pos->entries[i], (void*)pos->entries[i]);
+	}
+	seq_printf(m, "File descriptors:\n");
+	while (file_item != NULL) {
+		seq_printf(m, "   %s\n", file_item->path);
+
+		file_item = file_item->next;
+	}
+	pid_locks = radix_tree_lookup(&pid_tree, pos->pid);
+	if (pid_locks) {
+		struct lock_info *current_lock_info;
+		seq_printf(m, "Locks call trace:\n");
+
+		if (pid_locks->ring_index != 0) {
+			int len;
+			if (pid_locks->ring_index <= MAX_LOCK_STACK_TRACE_DEPTH) {
+				i = 0;
+				len = pid_locks->ring_index;
+			} else {
+				i = pid_locks->ring_index % MAX_LOCK_STACK_TRACE_DEPTH;
+				len = MAX_LOCK_STACK_TRACE_DEPTH;
+			}
+			while (len-- > 0) {
+				int j;
+				struct lock_process_stack *lock_node = pid_locks->pid_list[i];
+				seq_printf(m, "Lock address <%p>, stack: \n", (void *)lock_node->lock_addr);
+				for (j = 0; j < lock_node->nr_entries; ++j) {
+					seq_printf(m, "   [<%p>] %pS\n", (void*)lock_node->entries[j], (void*)lock_node->entries[j]);
+				}
+				hash_for_each_possible(lock_table, current_lock_info, node, lock_node->lock_addr) {
+					struct lock_process_stack *current_process;
+					if (current_lock_info->lock_address != lock_node->lock_addr)
+						continue;
+					for (current_process = current_lock_info->begin; current_process != NULL; current_process = current_process->next) {
+						if (current_process->pid == pos->pid) {
+							continue;
+						}
+						seq_printf(m, "   Lock also held by pid %d, comm %s\n", current_process->pid, current_process->comm);
+					}
+				}
+				i = (i + 1) % MAX_LOCK_STACK_TRACE_DEPTH;
+			}
+		}
+	}
+	seq_printf(m, "-- End item --\n");
 }
 
 // 用户写enable文件，以修改enable参数 
@@ -411,18 +346,44 @@ static ssize_t proc_process_info_write(struct file *file,
 	return size;
 }
 
-// 用户读process_info文件，以获取进程信息
-static ssize_t proc_process_info_read(struct file *file,
-		char __user *buf,
-		size_t size,
-		loff_t *ppos)
-{
-	ssize_t ret = 0;
-    unsigned int cpu;
-	if (*ppos) return 0;
+static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
+	unsigned int cpu;	
 	if (enable == 1) {
-    	preempt_disable();
-		// 临时禁止记录锁
+		pr_info("Printing CPU %u:\n", cpu_in_process_info);
+		if (cpu_in_process_info == -1) {
+			// 临时禁止记录
+			for_each_present_cpu(cpu)
+			{
+				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
+				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
+				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
+				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
+			}
+			cpu_in_process_info = 0;
+			spin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+		} else {
+			if (*pos == *per_cpu_ptr(&local_list_length, cpu_in_process_info)) {
+				*pos = 0;
+				spin_unlock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+				if (cpu_in_process_info == num_present_cpus() - 1) {
+					for_each_present_cpu(cpu)
+					{
+						atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+						atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+						atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
+						atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+					}
+					cpu_in_process_info = -1;
+					return NULL;
+				}
+				pr_info("Print CPU %u finished.\n", cpu_in_process_info);
+				++cpu_in_process_info;
+				spin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+				// 这样设计会带锁离开内核态，但应该不会死锁，因为我们只 trylock
+			}
+		}
+		return seq_list_start(per_cpu_ptr(&local_list_head.list, cpu_in_process_info), *pos);
+	} else if (enable == 2) {
 		for_each_present_cpu(cpu)
 		{
 			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
@@ -430,55 +391,53 @@ static ssize_t proc_process_info_read(struct file *file,
 			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
 			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
 		}
-    	for_each_present_cpu(cpu)
-    	{
-    	    pr_info("Printing CPU %u:\n", cpu);
-    	    // 如果访问的不是当前 CPU，要先看 local_list_lock 的值
-    	    if (cpu != smp_processor_id())
-    	    {
-				spin_lock_irqsave(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
-    	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
-				spin_unlock_irqrestore(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
-
-    	    }
-    	    else
-    	    {
-    	        // 如果访问的是当前 CPU 的，不需要用 local_list_lock 保护
-    	        ret += print_list(per_cpu_ptr(&local_list_head.list, cpu), buf, size, ppos);
-    	    }
-    	    pr_info("Print CPU %u finished.\n", cpu);
-    	}
-    	preempt_enable();
-		for_each_present_cpu(cpu)
-		{
-			atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
-			atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
-			atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
-			atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
-		}
-		return ret;
-	}
-	if (enable == 2) {
-		for_each_present_cpu(cpu)
-		{
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
-		}
-		ret += print_list(&single_list_head.list, buf, size, ppos);
-		for_each_present_cpu(cpu)
-		{
-			atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
-			atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
-			atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
-			atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
-		}
-		return ret;
+		return seq_list_start(&single_list_head.list, *pos);
 	}
 	return 0;
 }
 
+static void *process_info_seq_next(struct seq_file *s, void *v, loff_t *pos) {
+	if (enable == 1) {
+		return seq_list_next(v, per_cpu_ptr(&local_list_head.list, cpu_in_process_info), pos);
+	}
+	if (enable == 2) {
+		return seq_list_next(v, &single_list_head.list, pos);
+	}
+	return NULL;
+}
+
+static void process_info_seq_stop(struct seq_file *s, void *v) {
+	unsigned int cpu;
+	if (enable == 1) {
+		if (cpu_in_process_info == -1) {
+			return;
+		}
+	} else if (enable == 2) {
+		for_each_present_cpu(cpu)
+		{
+			atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
+			atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+		}
+	}
+}
+
+static int process_info_seq_show(struct seq_file *s, void *v) {
+	print_list(v, s);
+	return 0;
+}
+
+static struct seq_operations process_info_seq_ops = {
+	.start = process_info_seq_start,
+	.next = process_info_seq_next,
+	.stop = process_info_seq_stop,
+	.show = process_info_seq_show
+};
+
+static int process_info_open(struct inode *inode, struct file *file) {
+	return seq_open(file, &process_info_seq_ops);
+}
 
 static struct file_operations enable_fops = {
 	.write = proc_enable_write,
@@ -496,8 +455,11 @@ static struct file_operations irq_fops = {
 };
 
 static struct file_operations process_info_fops = {
+	.open = process_info_open,
+	.release = seq_release,
+	.llseek = seq_lseek,
 	.write = proc_process_info_write,
-	.read = proc_process_info_read,
+	.read = seq_read
 };
 
 static int __init start_module(void)
@@ -532,6 +494,7 @@ static int __init start_module(void)
     	printk(KERN_ERR "create process_info failed\n");
     	return -ENOMEM;
 	}
+	cpu_in_process_info = -1; // 无效值
 	if (enable == 1) {
 		int ret = start_trace();
 		if (ret < 0) {
