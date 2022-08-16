@@ -7,6 +7,14 @@
 
 链接: https://pan.baidu.com/s/1SUSBHMowotAiPzYQ6eTUYw 提取码: zzek 
 
+## 决赛过程文档
+
+[0711](records/0711.md)
+[0722](records/0722.md)
+[0729](records/0729.md)
+[0804](records/0804.md)
+[0812](records/0812.md)
+
 ## 初赛文档
 
 [docx](records/preliminary-contest.docx)
