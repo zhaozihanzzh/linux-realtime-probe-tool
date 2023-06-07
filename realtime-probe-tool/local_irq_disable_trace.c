@@ -9,6 +9,7 @@
 #include <linux/tracepoint.h>
 #include <linux/types.h>
 #include <linux/percpu.h>
+#include <linux/version.h>
 #include <trace/events/preemptirq.h>
 #include <asm/atomic.h>
 
@@ -140,6 +141,7 @@ DEFINE_PER_CPU(bool, local_tracing);
 
 // 关中断回调函数，经测试正常情况下此函数执行时中断已被关闭
 static void irqoff_handler(void *none, unsigned long ip, unsigned long parent_ip) {
+    smp_mb();
     // 需要保证排除自己触发的关中断
     if (*this_cpu_ptr(&local_tracing)) return;
     *this_cpu_ptr(&local_tracing) = true;
@@ -153,6 +155,7 @@ static void irqoff_handler(void *none, unsigned long ip, unsigned long parent_ip
 // 开中断，经测试正常情况下此函数执行时中断仍在关闭中
 static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip) {
     static struct timespec64 enable_local_irq_time;
+    smp_mb();
     if (*this_cpu_ptr(&local_tracing)) return;
     *this_cpu_ptr(&local_tracing) = true;
     if (preemptible()) {
@@ -174,6 +177,7 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
                 // 如果已经持有锁，直接不记录（此时可能正在查看信息）
                 *this_cpu_ptr(&has_off_record) = false;
                 *this_cpu_ptr(&local_tracing) = false;
+                smp_mb();
                 return;
             }
             if (likely(*this_cpu_ptr(&local_list_length) >= LENGTH_LIMIT)) {
@@ -202,13 +206,17 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             // 保存堆栈
             local_list_node->entries = kmalloc(MAX_STACK_TRACE_DEPTH * sizeof(unsigned long), GFP_ATOMIC);
             if (likely(local_list_node->entries)) {
+                #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,2,21)
+                local_list_node->nr_entries = stack_trace_save(local_list_node->entries, MAX_STACK_TRACE_DEPTH, 0);
+                #else
                 static struct stack_trace local_trace;
                 local_trace.nr_entries = 0;
                 local_trace.max_entries = MAX_STACK_TRACE_DEPTH;
                 local_trace.entries = local_list_node->entries;
                 local_trace.skip = 2;
-                save_stack_trace_tsk(on_irq_task, &local_trace);
+                //save_stack_trace_tsk(on_irq_task, &local_trace);
                 local_list_node->nr_entries = local_trace.nr_entries;
+                #endif
             }
 
             local_list_node->files_list = NULL;

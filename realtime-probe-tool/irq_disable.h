@@ -47,6 +47,7 @@ static void clear(struct list_head *head, struct kmem_cache *file_node_cache) {
             file_item = next;
         }
         kfree(pos->entries);
+        pos->entries = NULL;
         kfree(pos);
     }
 }
@@ -60,5 +61,6 @@ static void clear_node(struct process_info *node, struct kmem_cache *file_node_c
         file_item = next;
     }
     kfree(node->entries);
+    node->entries = NULL;
     kfree(node);
 }

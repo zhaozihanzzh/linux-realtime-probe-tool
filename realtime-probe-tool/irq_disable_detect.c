@@ -7,13 +7,15 @@
 #include <linux/time.h>
 #include <linux/fdtable.h>
 #include <linux/list.h>
+#include <linux/version.h>
 
 #include "irq_disable.h"
+#include "user_spinlock.h"
 
 static struct timespec64 close_time; // 关闭的时间
 
 unsigned int nr_entries;
-unsigned long *entries; // 关中断时的堆栈信息
+unsigned long *entries = NULL; // 关中断时的堆栈信息
 struct files_struct* files; // 文件
 static struct kmem_cache *file_node_cache;
 
@@ -29,7 +31,8 @@ unsigned int length = 0; // 链表长度
 #define LENGTH_LIMIT 20
 
 // 操作链表前先获取
-spinlock_t single_list_lock;
+//spinlock_t single_list_lock;
+uspinlock_t single_list_lock;
 unsigned long single_irq_flag;
 
 static struct kprobe* probe_irqs[3] = {NULL, NULL, NULL};
@@ -42,6 +45,9 @@ static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
     
     entries = kmalloc(MAX_STACK_TRACE_DEPTH * sizeof(*entries), GFP_ATOMIC);
     if (entries) {
+        #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,2,21)
+        nr_entries = stack_trace_save(entries, MAX_STACK_TRACE_DEPTH, 0);
+        #else
         struct stack_trace trace;
         trace.nr_entries = 0;
         trace.max_entries = MAX_STACK_TRACE_DEPTH;
@@ -49,6 +55,7 @@ static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
         trace.skip = 0;
         save_stack_trace_tsk(get_current(), &trace);
         nr_entries = trace.nr_entries;
+        #endif
     }
     is_disabled = true;
     return 0;
@@ -68,7 +75,11 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
             struct file_node **next_file;
             // 记录关中断的进程信息
             struct process_info *single_list_node;
-            spin_lock_irqsave(&single_list_lock, single_irq_flag);
+            local_irq_save(single_irq_flag);
+            preempt_disable();
+            uspin_lock(&single_list_lock);
+            //spin_lock_irqsave(&single_list_lock, single_irq_flag);
+            
             if (length >= LENGTH_LIMIT) {
                 // 如果链表长度超过上限，删除最老的记录并将其存储空间让给新记录
                 struct list_head *to_delete = single_list_head.list.next;
@@ -109,10 +120,14 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
             INIT_LIST_HEAD(&single_list_node->list);
             list_add_tail(&single_list_node->list, &single_list_head.list);
             ++length;
-            spin_unlock_irqrestore(&single_list_lock, single_irq_flag);
+            uspin_unlock(&single_list_lock);
+            local_irq_restore(single_irq_flag);
+            preempt_enable();
+            //spin_unlock_irqrestore(&single_list_lock, single_irq_flag);
         } else {
             kfree(entries);
         }
+        entries = NULL;
     }
     is_disabled = false;
     return 0;
@@ -120,17 +135,23 @@ static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
 
 void clear_single(void) {
     // 获取锁
-    spin_lock_irqsave(&single_list_lock, single_irq_flag);
+    local_irq_save(single_irq_flag);
+    preempt_disable();
+    uspin_lock(&single_list_lock);
+    //spin_lock_irqsave(&single_list_lock, single_irq_flag);
     // 释放链表内存，让头结点指向自己，更新长度
     clear(&single_list_head.list, file_node_cache);
     INIT_LIST_HEAD(&single_list_head.list);
     length = 0;
-    spin_unlock_irqrestore(&single_list_lock, single_irq_flag);
+    uspin_unlock(&single_list_lock);
+    local_irq_restore(single_irq_flag);
+    preempt_enable();
+    //spin_unlock_irqrestore(&single_list_lock, single_irq_flag);
 }
 
 int start_probe(void) {
     int ret;
-    struct kprobe *disable_irq_nosync_probe, *disable_irq_probe, *enable_irq_probe;
+    struct kprobe *disable_irq_nosync_probe = NULL, *disable_irq_probe = NULL, *enable_irq_probe = NULL;
     file_node_cache = kmem_cache_create("file_node_cache", sizeof(struct file_node), 0, SLAB_HWCACHE_ALIGN, NULL);
     if(file_node_cache == NULL) {
         pr_err("create file_node_cache failed!\n");
@@ -166,7 +187,7 @@ int start_probe(void) {
         pr_err("can't register probe_irqs, ret=%d\n", ret);
         return ret;
     }
-    spin_lock_init(&single_list_lock);
+    uspin_lock_init(&single_list_lock);
     pr_info("Start probe IRQ disable.\n");
     return 0;
 }

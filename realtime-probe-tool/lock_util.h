@@ -23,7 +23,9 @@ struct lock_process_stack {
     pid_t pid;
     char comm[TASK_COMM_LEN];
     unsigned int nr_entries;
-    unsigned long *entries;
+    int canary1;
+    unsigned long entries[MAX_LOCK_STACK_TRACE_DEPTH];
+    int canary2;
 };
 struct lock_info {
     // struct list_head process_list_head;

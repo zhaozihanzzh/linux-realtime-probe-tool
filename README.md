@@ -1,5 +1,11 @@
 # Proj154 - Linux 内核实时性分析
 
+## 赛后完善
+
+此项目已经发布到 [Github](https://github.com/zhaozihanzzh/linux-realtime-probe-tool) 上进行进一步完善。
+
+比赛时的链接在 [Gitlab](https://gitlab.eduxiji.net/202030445374/project788067-100200) 上。
+
 ## 决赛文档
 [docx](records/final-contest.docx)
 

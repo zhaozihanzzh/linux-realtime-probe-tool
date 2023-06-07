@@ -7,6 +7,7 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/list.h>
+#include <linux/version.h>
 
 #include "irq_disable.h"
 #include "procfs_helper.h"
@@ -354,10 +355,15 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 			// 临时禁止记录
 			for_each_present_cpu(cpu)
 			{
+				smp_mb();
 				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
+				smp_mb();
 				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
+				smp_mb();
 				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
+				smp_mb();
 				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
+				smp_mb();
 			}
 			cpu_in_process_info = 0;
 			spin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
@@ -368,10 +374,15 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 				if (cpu_in_process_info == num_present_cpus() - 1) {
 					for_each_present_cpu(cpu)
 					{
+						smp_mb();
 						atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+						smp_mb();
 						atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+						smp_mb();
 						atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
+						smp_mb();
 						atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+						smp_mb();
 					}
 					cpu_in_process_info = -1;
 					return NULL;
@@ -386,10 +397,15 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 	} else if (enable == 2) {
 		for_each_present_cpu(cpu)
 		{
+			smp_mb();
 			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
+			smp_mb();
 			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
+			smp_mb();
 			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
+			smp_mb();
 			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
+			smp_mb();
 		}
 		return seq_list_start(&single_list_head.list, *pos);
 	}
@@ -415,10 +431,15 @@ static void process_info_seq_stop(struct seq_file *s, void *v) {
 	} else if (enable == 2) {
 		for_each_present_cpu(cpu)
 		{
+			smp_mb();
 			atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+			smp_mb();
 			atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+			smp_mb();
 			atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
+			smp_mb();
 			atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+			smp_mb();
 		}
 	}
 }
@@ -439,6 +460,7 @@ static int process_info_open(struct inode *inode, struct file *file) {
 	return seq_open(file, &process_info_seq_ops);
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,6,0)
 static struct file_operations enable_fops = {
 	.write = proc_enable_write,
 	.read = proc_enable_read,
@@ -461,6 +483,30 @@ static struct file_operations process_info_fops = {
 	.write = proc_process_info_write,
 	.read = seq_read
 };
+#else
+static struct proc_ops enable_fops = {
+	.proc_write = proc_enable_write,
+	.proc_read = proc_enable_read,
+};
+
+static struct proc_ops latency_fops = {
+	.proc_write = proc_latency_write,
+	.proc_read = proc_latency_read,
+};
+
+static struct proc_ops irq_fops = {
+	.proc_write = proc_irq_write,
+	.proc_read = proc_irq_read,
+};
+
+static struct proc_ops process_info_fops = {
+	.proc_open = process_info_open,
+	.proc_release = seq_release,
+	.proc_lseek = seq_lseek,
+	.proc_write = proc_process_info_write,
+	.proc_read = seq_read
+};
+#endif
 
 static int __init start_module(void)
 {
