@@ -68,12 +68,6 @@ static void add_into_hashtable(unsigned long lock_addr) {
             // }
             // 链表试验版
             for (pos = current_lock_info->begin; pos != NULL; pos = pos->next) {
-                if (pos->canary1 != 0xdeadbeef) {
-                    pr_err_ratelimited("iter pos->canary1=%x\n", pos->canary1);
-                }
-                if (pos->canary2 != 0xdeadbeef) {
-                    pr_err_ratelimited("iter pos->canary2=%x\n", pos->canary2);
-                }
                 if (pos->pid == on_lock_task->pid) {
                     has_same_pid = true;
                     break;
@@ -105,7 +99,6 @@ static void add_into_hashtable(unsigned long lock_addr) {
                 if (new_node == NULL) {
                     pr_err("Can't alloc mem!\n");
                 }
-                new_node->canary1 = new_node->canary2 = 0xdeadbeef;
                 new_node->lock_addr = lock_addr;
                 // INIT_LIST_HEAD(&new_node->process_list_node);
                 /*链表试验版*/ new_node->next = current_lock_info->begin;
@@ -134,12 +127,6 @@ static void add_into_hashtable(unsigned long lock_addr) {
                 if (!irqs_disabled()) {
                     pr_err("115IRQON\n");
                     return;
-                }
-                if (new_node->canary1 != 0xdeadbeef) {
-                    pr_err("canary1 is %u in line 99!", new_node->canary1);
-                }
-                if (new_node->canary2 != 0xdeadbeef) {
-                    pr_err("canary2 is %u in line 102!", new_node->canary2);
                 }
                 // 加入链表（之前用的是 list_add,实验tail）
                 // list_add_tail(&new_node->process_list_node, &current_lock_info->process_list_head);
@@ -173,7 +160,6 @@ static void add_into_hashtable(unsigned long lock_addr) {
             pr_err("Can't alloc mem for new_node!\n");
         }
         new_node->lock_addr = lock_addr;
-        new_node->canary1 = new_node->canary2 = 0xdeadbeef;
         current_lock_info = kmalloc(sizeof(struct lock_info), GFP_ATOMIC);
         if (current_lock_info == NULL) {
             pr_err("Can't alloc mem for current_lock_info!\n");
@@ -212,19 +198,13 @@ static void add_into_hashtable(unsigned long lock_addr) {
             pr_err("185IRQON\n");
             return;
         }
-        if (new_node->canary1 != 0xdeadbeef) {
-            pr_err("canary1 is %u in line 159!", new_node->canary1);
-        }
-        if (new_node->canary2 != 0xdeadbeef) {
-            pr_err("canary2 is %u in line 162!", new_node->canary2);
-        }
         // list_add_tail(&new_node->process_list_node, &current_lock_info->process_list_head);
         current_lock_info->begin = new_node;
 
         hash_add(lock_table, &current_lock_info->node, current_lock_info->lock_address);
         ++hash_table_load_num;
 
-        /*pid_array_ptr = radix_tree_lookup(&pid_tree, new_node->pid);
+        pid_array_ptr = radix_tree_lookup(&pid_tree, new_node->pid);
         if (pid_array_ptr) {
             pid_array_ptr->pid_list[pid_array_ptr->ring_index++ % MAX_PID_LIST_SIZE] = new_node;
         } else {
@@ -236,7 +216,7 @@ static void add_into_hashtable(unsigned long lock_addr) {
             if (ret) {
                 pr_err("Can't insert PID %d into radix tree, return %d\n", new_node->pid, ret);
             }
-        }*/
+        }
     }
 }
 static int pre_handler_spin_lock_irqsave(struct kprobe *p, struct pt_regs *regs) {
@@ -450,15 +430,7 @@ void stop_lock_trace(void)
         // /* 原版 */list_for_each_entry_safe(pos, n, &current_lock_info->process_list_head, process_list_node) {
         pos = current_lock_info->begin; // ADD
         while (pos != NULL) { // ADD
-            int i, j;
-            struct pid_array *same_pid;
             n = pos->next; // ADD
-            if (pos->canary1 != 0xdeadbeef) {
-                pr_err_ratelimited("pos->canary1=%x\n", pos->canary1);
-            }
-            if (pos->canary2 != 0xdeadbeef) {
-                pr_err_ratelimited("pos->canary2=%x\n", pos->canary2);
-            }
             // pr_info("PID %d, comm %s, Backtrace: \n", pos->pid, pos->comm);
             // same_pid = radix_tree_lookup(&pid_tree, pos->pid);
             // if (same_pid) {

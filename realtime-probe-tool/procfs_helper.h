@@ -7,7 +7,7 @@ extern struct process_info single_list_head;
 extern int start_trace(void);
 extern void exit_trace(void);
 extern int local_irq_disable_output(void);
-extern spinlock_t local_list_lock;
+extern uspinlock_t local_list_lock;
 extern unsigned long local_irq_flag;
 extern struct process_info local_list_head;
 

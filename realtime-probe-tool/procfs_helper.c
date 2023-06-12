@@ -9,7 +9,8 @@
 #include <linux/list.h>
 #include <linux/version.h>
 
-#include "irq_disable.h"
+#include "user_spinlock.h"
+#include "process_info.h"
 #include "procfs_helper.h"
 #include "lock_util.h"
 
@@ -39,9 +40,9 @@ void print_list(struct list_head *head, struct seq_file *m)
 {
     unsigned int i;
     struct process_info *pos;
-	pos = list_entry(head, struct process_info, list);
     struct file_node *file_item;
 	struct pid_array *pid_locks;
+	pos = list_entry(head, struct process_info, list);
     if (pos == NULL)
     {
 		pr_info("pos is null!\n");
@@ -366,11 +367,11 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 				smp_mb();
 			}
 			cpu_in_process_info = 0;
-			spin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+			uspin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
 		} else {
 			if (*pos == *per_cpu_ptr(&local_list_length, cpu_in_process_info)) {
 				*pos = 0;
-				spin_unlock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+				uspin_unlock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
 				if (cpu_in_process_info == num_present_cpus() - 1) {
 					for_each_present_cpu(cpu)
 					{
@@ -389,7 +390,7 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 				}
 				pr_info("Print CPU %u finished.\n", cpu_in_process_info);
 				++cpu_in_process_info;
-				spin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+				uspin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
 				// 这样设计会带锁离开内核态，但应该不会死锁，因为我们只 trylock
 			}
 		}

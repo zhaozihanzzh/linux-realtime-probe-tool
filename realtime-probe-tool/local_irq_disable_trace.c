@@ -14,6 +14,7 @@
 #include <asm/atomic.h>
 
 #include "irq_disable.h"
+#include "user_spinlock.h"
 
 // https://github.com/bristot/rtsl
 /*
@@ -133,7 +134,7 @@ DEFINE_PER_CPU(unsigned int, local_list_length) = 0; // 链表长度
 DEFINE_PER_CPU(struct kmem_cache *, file_node_cache);
 
 // 标记是否已在操作链表
-DEFINE_PER_CPU(spinlock_t, local_list_lock);
+DEFINE_PER_CPU(uspinlock_t, local_list_lock);
 DEFINE_PER_CPU(unsigned long, local_irq_flag);
 
 // 标记是否已经在执行回调函数，以忽略掉模块自身执行产生的关中断
@@ -173,8 +174,12 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             struct task_struct *on_irq_task = get_current();
             // 记录关中断的进程信息
             struct process_info *local_list_node;
-            if (!spin_trylock_irqsave(this_cpu_ptr(&local_list_lock), *this_cpu_ptr(&local_irq_flag))) {
+            local_irq_save(*this_cpu_ptr(&local_irq_flag)); // 验证是否可以被删除【这样设计不够合理】
+            preempt_disable();
+            if (!uspin_trylock(this_cpu_ptr(&local_list_lock))) {
                 // 如果已经持有锁，直接不记录（此时可能正在查看信息）
+                preempt_enable();
+                local_irq_restore(*this_cpu_ptr(&local_irq_flag));
                 *this_cpu_ptr(&has_off_record) = false;
                 *this_cpu_ptr(&local_tracing) = false;
                 smp_mb();
@@ -214,7 +219,7 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
                 local_trace.max_entries = MAX_STACK_TRACE_DEPTH;
                 local_trace.entries = local_list_node->entries;
                 local_trace.skip = 2;
-                //save_stack_trace_tsk(on_irq_task, &local_trace);
+                save_stack_trace_tsk(on_irq_task, &local_trace);
                 local_list_node->nr_entries = local_trace.nr_entries;
                 #endif
             }
@@ -238,8 +243,9 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             INIT_LIST_HEAD(&local_list_node->list);
             list_add_tail(&local_list_node->list, this_cpu_ptr(&local_list_head.list));
             ++*this_cpu_ptr(&local_list_length);
-            spin_unlock_irqrestore(this_cpu_ptr(&local_list_lock), *this_cpu_ptr(&local_irq_flag));
-            
+            uspin_unlock(this_cpu_ptr(&local_list_lock));
+            local_irq_restore(*this_cpu_ptr(&local_irq_flag));
+            preempt_enable();
         }
     }
     *this_cpu_ptr(&has_off_record) = false;
@@ -265,7 +271,7 @@ int start_trace(void) {
     preempt_disable();
     for_each_present_cpu(cpu)
     {
-        spin_lock_init(per_cpu_ptr(&local_list_lock, cpu));
+        uspin_lock_init(per_cpu_ptr(&local_list_lock, cpu));
         // 初始化链表
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu));
         *per_cpu_ptr(&local_tracing, cpu) = false;
@@ -283,9 +289,13 @@ void exit_trace(void) {
     for_each_present_cpu(cpu)
     {
         // 回收链表
-        spin_lock_irqsave(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
+        local_irq_save(*per_cpu_ptr(&local_irq_flag, cpu));
+        preempt_disable();
+        uspin_lock(per_cpu_ptr(&local_list_lock, cpu));
         clear(per_cpu_ptr(&local_list_head.list, cpu), *per_cpu_ptr(&file_node_cache, cpu));
-        spin_unlock_irqrestore(per_cpu_ptr(&local_list_lock, cpu), *per_cpu_ptr(&local_irq_flag, cpu));
+        uspin_unlock(per_cpu_ptr(&local_list_lock, cpu));
+        local_irq_restore(*per_cpu_ptr(&local_irq_flag, cpu));
+        preempt_enable();
         *per_cpu_ptr(&local_list_length, cpu) = 0;
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu)); // 头结点指向自己
         kmem_cache_destroy(*per_cpu_ptr(&file_node_cache, cpu));
