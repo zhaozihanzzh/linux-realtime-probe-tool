@@ -12,7 +12,7 @@
 DEFINE_HASHTABLE(lock_table, LOCK_TABLE_BITS);
 int hash_table_load_num = 0;
 uspinlock_t table_lock;
-DEFINE_PER_CPU(atomic_t, in_prober[4]); // 如果 spin_lock 追踪时触发了 spin_lock_irqsave，不会再去记录 spin_lock_irqsave，否则会死锁
+DEFINE_PER_CPU(uspinlock_t, in_prober[4]); // 如果 spin_lock 追踪时触发了 spin_lock_irqsave，不会再去记录 spin_lock_irqsave，否则会死锁
 
 struct radix_tree_root pid_tree;
 
@@ -21,7 +21,7 @@ static struct kprobe* probe_locks[4] = {NULL, NULL, NULL, NULL};
 /** 对不同的锁分开记录，直接使用不同的哈希表，增强并发能力
  *@param 还没写完
  */
-static void add_into_hashtable(unsigned long lock_addr) {
+static void notrace add_into_hashtable(unsigned long lock_addr) {
     bool is_shared;
     struct lock_info *current_lock_info;
     struct task_struct *on_lock_task;
@@ -67,7 +67,7 @@ static void add_into_hashtable(unsigned long lock_addr) {
             //     }
             // }
             // 链表试验版
-            for (pos = current_lock_info->begin; pos != NULL; pos = pos->next) {
+            for (pos = READ_ONCE(current_lock_info->begin); pos != NULL; pos = pos->next) {
                 if (pos->pid == on_lock_task->pid) {
                     has_same_pid = true;
                     break;
@@ -101,7 +101,7 @@ static void add_into_hashtable(unsigned long lock_addr) {
                 }
                 new_node->lock_addr = lock_addr;
                 // INIT_LIST_HEAD(&new_node->process_list_node);
-                /*链表试验版*/ new_node->next = current_lock_info->begin;
+                /*链表试验版*/ WRITE_ONCE(new_node->next, READ_ONCE(current_lock_info->begin));
                 // 获取 PID 与 comm
                 new_node->pid = on_lock_task->pid;
                 memcpy(new_node->comm, on_lock_task->comm, TASK_COMM_LEN * sizeof(char));
@@ -130,7 +130,7 @@ static void add_into_hashtable(unsigned long lock_addr) {
                 }
                 // 加入链表（之前用的是 list_add,实验tail）
                 // list_add_tail(&new_node->process_list_node, &current_lock_info->process_list_head);
-                current_lock_info->begin = new_node;
+                WRITE_ONCE(current_lock_info->begin, READ_ONCE(new_node));
                 current_lock_info->process_list_len++;
                 pid_array_ptr = radix_tree_lookup(&pid_tree, new_node->pid);
                 if (pid_array_ptr) {
@@ -144,6 +144,10 @@ static void add_into_hashtable(unsigned long lock_addr) {
                     if (ret) {
                         pr_err("Can't insert PID %d into radix tree, return %d\n", new_node->pid, ret);
                     }
+                }
+                if (!irqs_disabled()) {
+                    pr_err("IRQON 149!\n");
+                    return;
                 }
             }
             break;
@@ -172,7 +176,10 @@ static void add_into_hashtable(unsigned long lock_addr) {
         new_node->next = NULL;
         memcpy(new_node->comm, on_lock_task->comm, TASK_COMM_LEN * sizeof(char));
         current_lock_info->process_list_len = 1;
-
+        if (!irqs_disabled()) {
+            pr_err("IRQON 180!\n");
+            return;
+        }
         // 保存栈
         // INIT_LIST_HEAD(&new_node->process_list_node);
         /*链表试验版*/
@@ -199,7 +206,7 @@ static void add_into_hashtable(unsigned long lock_addr) {
             return;
         }
         // list_add_tail(&new_node->process_list_node, &current_lock_info->process_list_head);
-        current_lock_info->begin = new_node;
+        WRITE_ONCE(current_lock_info->begin, READ_ONCE(new_node));
 
         hash_add(lock_table, &current_lock_info->node, current_lock_info->lock_address);
         ++hash_table_load_num;
@@ -217,89 +224,114 @@ static void add_into_hashtable(unsigned long lock_addr) {
                 pr_err("Can't insert PID %d into radix tree, return %d\n", new_node->pid, ret);
             }
         }
+        if (!irqs_disabled()) {
+            pr_err("IRQON 228!\n");
+            // return;
+        }
     }
 }
-static int pre_handler_spin_lock_irqsave(struct kprobe *p, struct pt_regs *regs) {
+static int notrace pre_handler_spin_lock_irqsave(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
     local_irq_save(irq_flags);
     preempt_disable();
-    smp_mb();
-    if (atomic_cmpxchg(this_cpu_ptr(&in_prober[0]), 0, 1)) {
-        smp_mb();
+    // smp_mb();
+    //if (atomic_cmpxchg(this_cpu_ptr(&in_prober[0]), 0, 1)) {
+    if (!uspin_trylock(this_cpu_ptr(&in_prober[0]))) {
         local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
+    smp_mb();
     uspin_lock(&table_lock);
     smp_mb();
     add_into_hashtable(regs->di);
+    if (!irqs_disabled()) {
+        pr_err("IRQON 249!\n");
+        // return 0;
+    }
+    smp_mb();//ORIG smp_wmb();
     uspin_unlock(&table_lock);
-    atomic_set(this_cpu_ptr(&in_prober[0]), false);
-    smp_mb();
+    smp_mb();//ORIG smp_wmb();
+    //atomic_set(this_cpu_ptr(&in_prober[0]), false);
+    uspin_unlock(this_cpu_ptr(&in_prober[0]));
+    smp_mb();//ORIG smp_wmb();
     local_irq_restore(irq_flags);
     preempt_enable();
 
     return 0;
 }
-static int pre_handler_spin_lock(struct kprobe *p, struct pt_regs *regs) {
+static int notrace pre_handler_spin_lock(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
     local_irq_save(irq_flags);
     preempt_disable();
-    smp_mb();
-    if (atomic_cmpxchg(this_cpu_ptr(&in_prober[1]), 0, 1)) {
-        smp_mb();
+    // smp_mb();
+    // if (atomic_cmpxchg(this_cpu_ptr(&in_prober[1]), 0, 1)) {
+    if (!uspin_trylock(this_cpu_ptr(&in_prober[1]))) {
         local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
-    uspin_lock(&table_lock);
-    add_into_hashtable(regs->di);
-    uspin_unlock(&table_lock);
-    atomic_set(this_cpu_ptr(&in_prober[1]), false);
     smp_mb();
+    uspin_lock(&table_lock);
+    smp_mb();
+    add_into_hashtable(regs->di);
+    smp_mb();
+    uspin_unlock(&table_lock);
+    smp_mb();//ORIG smp_wmb();
+    // atomic_set(this_cpu_ptr(&in_prober[1]), false);
+    uspin_unlock(this_cpu_ptr(&in_prober[1]));
+    smp_mb();//ORIG smp_wmb();
     local_irq_restore(irq_flags);
     preempt_enable();
 
     return 0;
 }
-static int pre_handler_spin_lock_irq(struct kprobe *p, struct pt_regs *regs) {
+static int notrace pre_handler_spin_lock_irq(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
     local_irq_save(irq_flags);
     preempt_disable();
-    smp_mb();
-    if (atomic_cmpxchg(this_cpu_ptr(&in_prober[2]), 0, 1)) {
-        smp_mb();
+    // smp_mb();
+    // if (atomic_cmpxchg(this_cpu_ptr(&in_prober[2]), 0, 1)) {
+    if (!uspin_trylock(this_cpu_ptr(&in_prober[2]))) {
         local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
+    smp_mb();
     uspin_lock(&table_lock);
     smp_mb();
     add_into_hashtable(regs->di);
+    smp_mb();//ORIG smp_wmb();
     uspin_unlock(&table_lock);
-    atomic_set(this_cpu_ptr(&in_prober[2]), false);
-    smp_mb();
+    smp_mb();//ORIG smp_wmb();
+    // atomic_set(this_cpu_ptr(&in_prober[2]), false);
+    uspin_unlock(this_cpu_ptr(&in_prober[2]));
+    smp_mb();//ORIG smp_wmb();
     local_irq_restore(irq_flags);
     preempt_enable();
     return 0;
 }
-static int pre_handler_spin_lock_bh(struct kprobe *p, struct pt_regs *regs) {
+static int notrace pre_handler_spin_lock_bh(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
     local_irq_save(irq_flags);
     preempt_disable();
-    smp_mb();
-    if (atomic_cmpxchg(this_cpu_ptr(&in_prober[3]), 0, 1)) {
-        smp_mb();
+    // smp_mb();
+    // if (atomic_cmpxchg(this_cpu_ptr(&in_prober[3]), 0, 1)) {
+    if (!uspin_trylock(this_cpu_ptr(&in_prober[3]))) {
         local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
+    smp_mb();//ORIG smp_wmb();
     uspin_lock(&table_lock);
     smp_mb();
     add_into_hashtable(regs->di);
+    smp_mb();//ORIG smp_wmb();
     uspin_unlock(&table_lock);
-    atomic_set(this_cpu_ptr(&in_prober[3]), false);
-    smp_mb();
+    smp_mb();//ORIG smp_wmb();
+    // atomic_set(this_cpu_ptr(&in_prober[3]), false);
+    uspin_unlock(this_cpu_ptr(&in_prober[3]));
+    smp_mb();//ORIG smp_wmb();
     local_irq_restore(irq_flags);
     preempt_enable();
     return 0;
@@ -311,15 +343,19 @@ int start_lock_trace(void)
     struct kprobe *probe_spin_lock_irqsave, *probe_spin_lock, *probe_spin_lock_irq, *probe_spin_lock_bh;
     uspin_lock_init(&table_lock);
     hash_init(lock_table);//这行没必要,重复了;在重新建立时才有必要
-    INIT_RADIX_TREE(&pid_tree, GFP_ATOMIC); // RADIX TREE 里面居然含有 SPIN LOCK!!!
+    INIT_RADIX_TREE(&pid_tree, GFP_ATOMIC);
     //RADIX_TREE_INIT(pid_tree, GFP_ATOMIC);
     for_each_present_cpu(cpu) {
-        atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0);
-        atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0);
-        atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0);
-        atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0);
+        // atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0);
+        uspin_lock_init(per_cpu_ptr(&in_prober[0], cpu));
+        // atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0);
+        uspin_lock_init(per_cpu_ptr(&in_prober[1], cpu));
+        // atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0);
+        uspin_lock_init(per_cpu_ptr(&in_prober[2], cpu));
+        // atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0);
+        uspin_lock_init(per_cpu_ptr(&in_prober[3], cpu));
     }
-    smp_mb();
+    smp_mb();//ORIG smp_wmb();
     // 由于某些原因，最好动态分配 KProbe 结构体，否则 unregister 后无法 re-register
     // 见：https://lore.kernel.org/all/20210114092525.5a2e78b404602fa82d6d6353@kernel.org/
     // https://stackoverflow.com/questions/46498699/register-kprobe-returns-einval-without-additional-memory-on-containing-struct
@@ -360,7 +396,7 @@ int start_lock_trace(void)
     pr_info("Registered probe_locks.\n");
     return 0;
 }
-void stop_lock_trace(void)
+void notrace stop_lock_trace(void)
 {
     int cpu, i;
     struct lock_info *current_lock_info;
@@ -369,40 +405,46 @@ void stop_lock_trace(void)
     struct radix_tree_iter iter;
     unsigned long bkt, irq_flags;
     pr_info("Prepare to unregister.\n");
-    unregister_kprobes(probe_locks, 4);
-    for (i = 0; i < 4; ++i) {
-        kfree(probe_locks[i]);
-        probe_locks[i] = NULL;
-    }
     for_each_present_cpu(cpu) {
-        smp_mb();
-        pr_info("CPU %d in_prober[0]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[0], cpu)));
-        smp_mb();
-        atomic_set(per_cpu_ptr(&in_prober[0], cpu), 1);
-        smp_mb();
-        pr_info("CPU %d in_prober[1]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[1], cpu)));
-        smp_mb();
-        atomic_set(per_cpu_ptr(&in_prober[1], cpu), 1);
-        smp_mb();
-        pr_info("CPU %d in_prober[2]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[2], cpu)));
-        smp_mb();
-        atomic_set(per_cpu_ptr(&in_prober[2], cpu), 1);
-        smp_mb();
-        pr_info("CPU %d in_prober[3]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[3], cpu)));
-        smp_mb();
-        atomic_set(per_cpu_ptr(&in_prober[3], cpu), 1);
-        smp_mb();
+        // smp_mb();
+        // pr_info("CPU %d in_prober[0]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[0], cpu)));
+        // smp_mb();
+        // atomic_set(per_cpu_ptr(&in_prober[0], cpu), 1);
+        uspin_lock(per_cpu_ptr(&in_prober[0], cpu));
+        smp_mb();//ORIG smp_wmb();
+        // pr_info("CPU %d in_prober[1]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[1], cpu)));
+        // smp_mb();
+        // atomic_set(per_cpu_ptr(&in_prober[1], cpu), 1);
+        uspin_lock(per_cpu_ptr(&in_prober[1], cpu));
+        smp_mb();//ORIG smp_wmb();
+        // pr_info("CPU %d in_prober[2]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[2], cpu)));
+        // smp_mb();
+        // atomic_set(per_cpu_ptr(&in_prober[2], cpu), 1);
+        uspin_lock(per_cpu_ptr(&in_prober[2], cpu));
+        smp_mb();//ORIG smp_wmb();
+        // pr_info("CPU %d in_prober[3]=%d\n", cpu, atomic_read(per_cpu_ptr(&in_prober[3], cpu)));
+        // smp_mb();
+        // atomic_set(per_cpu_ptr(&in_prober[3], cpu), 1);
+        uspin_lock(per_cpu_ptr(&in_prober[3], cpu));
+        smp_mb();//ORIG smp_wmb();
     }
     // unregister_kprobe(&probe_spin_lock_irqsave);
     // unregister_kprobe(&probe_spin_lock);
     // unregister_kprobe(&probe_spin_lock_irq);
     // unregister_kprobe(&probe_spin_lock_bh);
-    pr_info("Unregister done.\n");
     // in_prober = true;
+    unregister_kprobes(probe_locks, 4);
+    rcu_barrier();
     // 先关中断，再关抢占，最后持有锁
     local_irq_save(irq_flags);
     preempt_disable();
     uspin_lock(&table_lock);
+    smp_mb();
+    for (i = 0; i < 4; ++i) {
+        kfree(probe_locks[i]);
+        probe_locks[i] = NULL;
+    }
+    // pr_info("Unregister done.\n");// 不在中断里输出
     //hlist_for_each_entry_safe()
     //          name bkt obj number
     // hash_for_each(lock_table, bkt, current_lock_info, node){}
@@ -428,7 +470,7 @@ void stop_lock_trace(void)
         }
         //if (current_lock_info->process_node.process_list.next != &current_lock_info->process_node.process_list) {
         // /* 原版 */list_for_each_entry_safe(pos, n, &current_lock_info->process_list_head, process_list_node) {
-        pos = current_lock_info->begin; // ADD
+        WRITE_ONCE(pos, READ_ONCE(current_lock_info->begin)); // ADD
         while (pos != NULL) { // ADD
             n = pos->next; // ADD
             // pr_info("PID %d, comm %s, Backtrace: \n", pos->pid, pos->comm);
@@ -445,16 +487,25 @@ void stop_lock_trace(void)
             pos = n; // ADD
         }
         //}
-        current_lock_info->begin = NULL;
+        WRITE_ONCE(current_lock_info->begin, NULL);
         hash_del(&current_lock_info->node);
         // pr_info("tofree%p\n", current_lock_info);
         kfree(current_lock_info);
     }
-    pr_info("Deleting radix trees.\n");
+    // pr_info("Deleting radix trees.\n");
     radix_tree_for_each_slot(slot, &pid_tree, &iter, 0) {
-        void *this_slot = radix_tree_deref_slot(slot);
-        kfree(this_slot);
-        radix_tree_delete(&pid_tree, iter.index);
+        struct pid_array *this_slot = radix_tree_deref_slot(slot);
+        if (!this_slot) {
+            continue;
+        }
+        if (radix_tree_exception(this_slot)) {
+            if (radix_tree_deref_retry(this_slot)) {
+                slot = radix_tree_iter_retry(&iter);
+            }
+        } else {
+            radix_tree_delete(&pid_tree, iter.index /**this_slot->pid_list[this_slot->ring_index - 1]->pid*/); // 似乎第二个参数应该是 this_slot->id？
+            kfree(this_slot);
+        }
     }
     // 先释放锁，再开中断，最后开抢占
     uspin_unlock(&table_lock);

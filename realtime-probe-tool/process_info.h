@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #include <linux/slab.h>
 #include <linux/sched.h>
+#include "user_spinlock.h"
 // 链表结点
 struct process_info
 {
@@ -23,3 +24,4 @@ struct file_node
     char *path;
     struct file_node *next;
 };
+DECLARE_PER_CPU(uspinlock_t, in_prober[4]);

@@ -13,7 +13,7 @@
 #define LOCK_TABLE_BITS 14
 
 extern DECLARE_HASHTABLE(lock_table, LOCK_TABLE_BITS);
-DECLARE_PER_CPU(atomic_t, in_prober[4]);
+// DECLARE_PER_CPU(uspinlock_t, in_prober[4]);
 extern struct radix_tree_root pid_tree;
 
 struct lock_process_stack {

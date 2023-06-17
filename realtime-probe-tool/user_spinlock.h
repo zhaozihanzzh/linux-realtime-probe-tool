@@ -11,7 +11,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
+#include <linux/compiler.h>
 #define NUM_THREADS (65535)
 
 #if NUM_THREADS < 256
@@ -158,7 +158,7 @@ static __inline__ void uspin_lock(struct uspinlock *lock)
         if(inc.head == inc.tail) break;
         //loop
         __RELAX();
-        inc.head = __ACCESS_ONCE(lock->tickets.head);
+        inc.head = READ_ONCE(lock->tickets.head);
     } while(1);
 
 #ifdef DEBUG
@@ -183,7 +183,7 @@ static __inline__ void uspin_unlock(struct uspinlock *lock)
 static __inline__ int uspin_trylock(struct uspinlock *lock)
 {
     struct uspinlock __old, __new;
-    __old.tickets  = __ACCESS_ONCE(lock->tickets);
+    __old.tickets  = READ_ONCE(lock->tickets);
     if(__old.tickets.head != __old.tickets.tail) return 0;
     /*
      * Now increment the ticket number (high order ticket/tail byte/s) for the lock 

@@ -85,7 +85,7 @@ void print_list(struct list_head *head, struct seq_file *m)
 					struct lock_process_stack *current_process;
 					if (current_lock_info->lock_address != lock_node->lock_addr)
 						continue;
-					for (current_process = current_lock_info->begin; current_process != NULL; current_process = current_process->next) {
+					for (current_process = READ_ONCE(current_lock_info->begin); current_process != NULL; current_process = current_process->next) {
 						if (current_process->pid == pos->pid) {
 							continue;
 						}
@@ -356,14 +356,13 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 			// 临时禁止记录
 			for_each_present_cpu(cpu)
 			{
+				uspin_lock(per_cpu_ptr(&in_prober[0], cpu));
 				smp_mb();
-				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
+				uspin_lock(per_cpu_ptr(&in_prober[1], cpu));
 				smp_mb();
-				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
+				uspin_lock(per_cpu_ptr(&in_prober[2], cpu));
 				smp_mb();
-				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
-				smp_mb();
-				while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
+				uspin_lock(per_cpu_ptr(&in_prober[3], cpu));
 				smp_mb();
 			}
 			cpu_in_process_info = 0;
@@ -375,14 +374,13 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 				if (cpu_in_process_info == num_present_cpus() - 1) {
 					for_each_present_cpu(cpu)
 					{
+						uspin_unlock(per_cpu_ptr(&in_prober[0], cpu));
 						smp_mb();
-						atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+						uspin_unlock(per_cpu_ptr(&in_prober[1], cpu));
 						smp_mb();
-						atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+						uspin_unlock(per_cpu_ptr(&in_prober[2], cpu));
 						smp_mb();
-						atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
-						smp_mb();
-						atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+						uspin_unlock(per_cpu_ptr(&in_prober[3], cpu));
 						smp_mb();
 					}
 					cpu_in_process_info = -1;
@@ -398,14 +396,13 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 	} else if (enable == 2) {
 		for_each_present_cpu(cpu)
 		{
+			uspin_lock(per_cpu_ptr(&in_prober[0], cpu));
 			smp_mb();
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[0], cpu), 0, 1)) ;
+			uspin_lock(per_cpu_ptr(&in_prober[1], cpu));
 			smp_mb();
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[1], cpu), 0, 1)) ;
+			uspin_lock(per_cpu_ptr(&in_prober[2], cpu));
 			smp_mb();
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[2], cpu), 0, 1)) ;
-			smp_mb();
-			while (atomic_cmpxchg(per_cpu_ptr(&in_prober[3], cpu), 0, 1)) ;
+			uspin_lock(per_cpu_ptr(&in_prober[3], cpu));
 			smp_mb();
 		}
 		return seq_list_start(&single_list_head.list, *pos);
@@ -432,14 +429,13 @@ static void process_info_seq_stop(struct seq_file *s, void *v) {
 	} else if (enable == 2) {
 		for_each_present_cpu(cpu)
 		{
+			uspin_unlock(per_cpu_ptr(&in_prober[0], cpu));
 			smp_mb();
-			atomic_set(per_cpu_ptr(&in_prober[0], cpu), 0) ;
+			uspin_unlock(per_cpu_ptr(&in_prober[1], cpu));
 			smp_mb();
-			atomic_set(per_cpu_ptr(&in_prober[1], cpu), 0) ;
+			uspin_unlock(per_cpu_ptr(&in_prober[2], cpu));
 			smp_mb();
-			atomic_set(per_cpu_ptr(&in_prober[2], cpu), 0) ;
-			smp_mb();
-			atomic_set(per_cpu_ptr(&in_prober[3], cpu), 0) ;
+			uspin_unlock(per_cpu_ptr(&in_prober[3], cpu));
 			smp_mb();
 		}
 	}
