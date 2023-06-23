@@ -33,7 +33,7 @@ MODULE_PARM_DESC(latency, "Max lasting time(ns) when interrupt is closed that we
 time64_t nsec_limit;
 
 // 记录输出 process_info 时当前的 CPU 序号
-static int cpu_in_process_info;
+static atomic_t cpu_in_process_info;
 
 // 输出到 seq_file
 void print_list(struct list_head *head, struct seq_file *m)
@@ -348,11 +348,11 @@ static ssize_t proc_process_info_write(struct file *file,
 	return size;
 }
 
-static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
+static void notrace *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 	unsigned int cpu;	
 	if (enable == 1) {
-		pr_info("Printing CPU %u:\n", cpu_in_process_info);
-		if (cpu_in_process_info == -1) {
+		pr_info("Printing CPU %d:\n", atomic_read(&cpu_in_process_info));
+		if (atomic_read(&cpu_in_process_info) == -1) {
 			// 临时禁止记录
 			for_each_present_cpu(cpu)
 			{
@@ -365,13 +365,16 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 				uspin_lock(per_cpu_ptr(&in_prober[3], cpu));
 				smp_mb();
 			}
-			cpu_in_process_info = 0;
-			uspin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+			atomic_set(&cpu_in_process_info, 0);
+			uspin_lock(per_cpu_ptr(&local_list_lock, atomic_read(&cpu_in_process_info)));
+			smp_mb();
 		} else {
-			if (*pos == *per_cpu_ptr(&local_list_length, cpu_in_process_info)) {
+			if (*pos == *per_cpu_ptr(&local_list_length, atomic_read(&cpu_in_process_info))) {
 				*pos = 0;
-				uspin_unlock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
-				if (cpu_in_process_info == num_present_cpus() - 1) {
+				uspin_unlock(per_cpu_ptr(&local_list_lock, atomic_read(&cpu_in_process_info)));
+				smp_mb();
+				pr_info("Print CPU %d finished.\n", atomic_read(&cpu_in_process_info));
+				if (atomic_read(&cpu_in_process_info) == num_present_cpus() - 1) {
 					for_each_present_cpu(cpu)
 					{
 						uspin_unlock(per_cpu_ptr(&in_prober[0], cpu));
@@ -383,16 +386,16 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 						uspin_unlock(per_cpu_ptr(&in_prober[3], cpu));
 						smp_mb();
 					}
-					cpu_in_process_info = -1;
+					atomic_set(&cpu_in_process_info, -1);
 					return NULL;
 				}
-				pr_info("Print CPU %u finished.\n", cpu_in_process_info);
-				++cpu_in_process_info;
-				uspin_lock(per_cpu_ptr(&local_list_lock, cpu_in_process_info));
+				atomic_inc(&cpu_in_process_info);
+				uspin_lock(per_cpu_ptr(&local_list_lock, atomic_read(&cpu_in_process_info)));
 				// 这样设计会带锁离开内核态，但应该不会死锁，因为我们只 trylock
+				smp_mb();
 			}
 		}
-		return seq_list_start(per_cpu_ptr(&local_list_head.list, cpu_in_process_info), *pos);
+		return seq_list_start(per_cpu_ptr(&local_list_head.list, atomic_read(&cpu_in_process_info)), *pos);
 	} else if (enable == 2) {
 		for_each_present_cpu(cpu)
 		{
@@ -412,7 +415,7 @@ static void *process_info_seq_start(struct seq_file *s, loff_t *pos) {
 
 static void *process_info_seq_next(struct seq_file *s, void *v, loff_t *pos) {
 	if (enable == 1) {
-		return seq_list_next(v, per_cpu_ptr(&local_list_head.list, cpu_in_process_info), pos);
+		return seq_list_next(v, per_cpu_ptr(&local_list_head.list, atomic_read(&cpu_in_process_info)), pos);
 	}
 	if (enable == 2) {
 		return seq_list_next(v, &single_list_head.list, pos);
@@ -423,7 +426,7 @@ static void *process_info_seq_next(struct seq_file *s, void *v, loff_t *pos) {
 static void process_info_seq_stop(struct seq_file *s, void *v) {
 	unsigned int cpu;
 	if (enable == 1) {
-		if (cpu_in_process_info == -1) {
+		if (atomic_read(&cpu_in_process_info) == -1) {
 			return;
 		}
 	} else if (enable == 2) {
@@ -537,7 +540,7 @@ static int __init start_module(void)
     	printk(KERN_ERR "create process_info failed\n");
     	return -ENOMEM;
 	}
-	cpu_in_process_info = -1; // 无效值
+	atomic_set(&cpu_in_process_info, -1); // 无效值
 	if (enable == 1) {
 		int ret = start_trace();
 		if (ret < 0) {

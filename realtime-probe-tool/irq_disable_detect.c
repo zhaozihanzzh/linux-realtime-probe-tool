@@ -61,7 +61,7 @@ static int pre_handler_disable_irq(struct kprobe *p, struct pt_regs *regs) {
     return 0;
 }
 static int pre_handler_enable_irq(struct kprobe *p, struct pt_regs *regs) {
-    static struct timespec64 open_time;
+    struct timespec64 open_time;
     if (regs->di != MASK_ID) {
         return 0;
     }

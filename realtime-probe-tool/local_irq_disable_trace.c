@@ -11,7 +11,6 @@
 #include <linux/percpu.h>
 #include <linux/version.h>
 #include <trace/events/preemptirq.h>
-#include <asm/atomic.h>
 
 #include "irq_disable.h"
 #include "user_spinlock.h"
@@ -135,33 +134,44 @@ DEFINE_PER_CPU(struct kmem_cache *, file_node_cache);
 
 // 标记是否已在操作链表
 DEFINE_PER_CPU(uspinlock_t, local_list_lock);
-DEFINE_PER_CPU(unsigned long, local_irq_flag);
 
 // 标记是否已经在执行回调函数，以忽略掉模块自身执行产生的关中断
-DEFINE_PER_CPU(bool, local_tracing);
+DEFINE_PER_CPU(uspinlock_t, local_tracing);
 
 // 关中断回调函数，经测试正常情况下此函数执行时中断已被关闭
-static void irqoff_handler(void *none, unsigned long ip, unsigned long parent_ip) {
-    smp_mb();
+static void notrace irqoff_handler(void *none, unsigned long ip, unsigned long parent_ip) {
+    unsigned long local_irq_flag;
+    // smp_mb();
     // 需要保证排除自己触发的关中断
-    if (*this_cpu_ptr(&local_tracing)) return;
-    *this_cpu_ptr(&local_tracing) = true;
-    if (preemptible()) {
-        pr_warn("IRQ OFF can preempt!\n"); // 调试用，这不该发生
+    raw_local_irq_save(local_irq_flag); // 验证是否可以被删除【这样设计不够合理】
+    preempt_disable();
+    if (!uspin_trylock(this_cpu_ptr(&local_tracing))) {
+        raw_local_irq_restore(local_irq_flag);
+        preempt_enable();
+        return;
     }
+    smp_wmb();
     ktime_get_ts64(this_cpu_ptr(&disable_local_irq_time));
     *this_cpu_ptr(&has_off_record) = true;
-    *this_cpu_ptr(&local_tracing) = false;
+    smp_wmb();
+    uspin_unlock(this_cpu_ptr(&local_tracing));
+    smp_wmb();
+    raw_local_irq_restore(local_irq_flag);
+    preempt_enable();
 }
 // 开中断，经测试正常情况下此函数执行时中断仍在关闭中
-static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip) {
-    static struct timespec64 enable_local_irq_time;
-    smp_mb();
-    if (*this_cpu_ptr(&local_tracing)) return;
-    *this_cpu_ptr(&local_tracing) = true;
-    if (preemptible()) {
-        pr_warn("IRQ ON can preempt!\n");
+static void notrace irqon_handler(void *none, unsigned long ip, unsigned long parent_ip) {
+    unsigned long local_irq_flag;
+    struct timespec64 enable_local_irq_time;
+    // smp_mb();
+    raw_local_irq_save(local_irq_flag);
+    preempt_disable();
+    if (!uspin_trylock(this_cpu_ptr(&local_tracing))) {
+        raw_local_irq_restore(local_irq_flag);
+        preempt_enable();
+        return;
     }
+    smp_wmb();
     if (likely(*this_cpu_ptr(&has_off_record))) {
         time64_t local_duration;
         ktime_get_ts64(&enable_local_irq_time);
@@ -174,17 +184,17 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             struct task_struct *on_irq_task = get_current();
             // 记录关中断的进程信息
             struct process_info *local_list_node;
-            local_irq_save(*this_cpu_ptr(&local_irq_flag)); // 验证是否可以被删除【这样设计不够合理】
-            preempt_disable();
             if (!uspin_trylock(this_cpu_ptr(&local_list_lock))) {
                 // 如果已经持有锁，直接不记录（此时可能正在查看信息）
-                preempt_enable();
-                local_irq_restore(*this_cpu_ptr(&local_irq_flag));
                 *this_cpu_ptr(&has_off_record) = false;
-                *this_cpu_ptr(&local_tracing) = false;
+                smp_wmb();
+                uspin_unlock(this_cpu_ptr(&local_tracing));
                 smp_mb();
+                raw_local_irq_restore(local_irq_flag);
+                preempt_enable();
                 return;
             }
+            smp_wmb();
             if (likely(*this_cpu_ptr(&local_list_length) >= LENGTH_LIMIT)) {
                 // 如果链表长度超过上限，删除最老的记录并将其存储空间让给新记录
                 // 但是，会不会保留关中断时间最长的更合理？
@@ -200,21 +210,20 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
                     kmem_cache_free(*this_cpu_ptr(&file_node_cache), file_item);
                     file_item = next;
                 }
-                kfree(local_list_node->entries);
             } else {
                 local_list_node = kmalloc(sizeof(struct process_info), GFP_ATOMIC);
+                local_list_node->entries = kmalloc(MAX_STACK_TRACE_DEPTH * sizeof(unsigned long), GFP_ATOMIC);
             }
             local_list_node->cpu = on_irq_task->cpu;
             local_list_node->pid = on_irq_task->pid;
             memcpy(local_list_node->comm, on_irq_task->comm, TASK_COMM_LEN);
             local_list_node->duration = local_duration;
             // 保存堆栈
-            local_list_node->entries = kmalloc(MAX_STACK_TRACE_DEPTH * sizeof(unsigned long), GFP_ATOMIC);
             if (likely(local_list_node->entries)) {
                 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5,2,21)
                 local_list_node->nr_entries = stack_trace_save(local_list_node->entries, MAX_STACK_TRACE_DEPTH, 0);
                 #else
-                static struct stack_trace local_trace;
+                struct stack_trace local_trace;
                 local_trace.nr_entries = 0;
                 local_trace.max_entries = MAX_STACK_TRACE_DEPTH;
                 local_trace.entries = local_list_node->entries;
@@ -244,57 +253,62 @@ static void irqon_handler(void *none, unsigned long ip, unsigned long parent_ip)
             list_add_tail(&local_list_node->list, this_cpu_ptr(&local_list_head.list));
             ++*this_cpu_ptr(&local_list_length);
             uspin_unlock(this_cpu_ptr(&local_list_lock));
-            local_irq_restore(*this_cpu_ptr(&local_irq_flag));
-            preempt_enable();
+            smp_mb();
         }
     }
     *this_cpu_ptr(&has_off_record) = false;
-    *this_cpu_ptr(&local_tracing) = false;
+    smp_wmb();
+    uspin_unlock(this_cpu_ptr(&local_tracing));
+    smp_wmb();
+    raw_local_irq_restore(local_irq_flag);
+    preempt_enable();
 }
 #define TP_NUM 2
-static struct tp_and_name tps[TP_NUM] = {
-    {
-        .probe = irqoff_handler,
-        .name = "irq_disable",
-        .registered = 0
-    },
-    {
-        .probe = irqon_handler,
-        .name = "irq_enable",
-        .registered = 0
-    }
-};
+static struct tp_and_name tps[TP_NUM];
 
 int start_trace(void) {
     unsigned int cpu;
     // 访问 per_cpu 时禁止调度
-    preempt_disable();
     for_each_present_cpu(cpu)
     {
         uspin_lock_init(per_cpu_ptr(&local_list_lock, cpu));
         // 初始化链表
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu));
-        *per_cpu_ptr(&local_tracing, cpu) = false;
+        uspin_lock_init(per_cpu_ptr(&local_tracing, cpu));
         *per_cpu_ptr(&file_node_cache, cpu) = kmem_cache_create("file_node_cache", \
             sizeof(struct file_node), 0, SLAB_HWCACHE_ALIGN, NULL);
     }
-    preempt_enable();
+    memset(tps, 0, sizeof(tps));
+    tps[0].probe = irqoff_handler;
+    tps[0].name = "irq_disable";
+    tps[0].registered = 0;
+    tps[1].probe = irqon_handler;
+    tps[1].name = "irq_enable";
+    tps[1].registered = 0;
     return register_tracepoints(tps, TP_NUM);
 }
 
 void exit_trace(void) {
     unsigned int cpu;
     unregister_tracepoints(tps, TP_NUM);
+    for_each_present_cpu(cpu)
+    {
+        uspin_lock(per_cpu_ptr(&local_tracing, cpu));
+        smp_mb();
+    }
 
     for_each_present_cpu(cpu)
     {
         // 回收链表
-        local_irq_save(*per_cpu_ptr(&local_irq_flag, cpu));
+        unsigned long local_irq_flag;
+        raw_local_irq_save(local_irq_flag);
         preempt_disable();
         uspin_lock(per_cpu_ptr(&local_list_lock, cpu));
+        smp_mb();
         clear(per_cpu_ptr(&local_list_head.list, cpu), *per_cpu_ptr(&file_node_cache, cpu));
         uspin_unlock(per_cpu_ptr(&local_list_lock, cpu));
-        local_irq_restore(*per_cpu_ptr(&local_irq_flag, cpu));
+        smp_mb();
+        raw_local_irq_restore(local_irq_flag);
         preempt_enable();
         *per_cpu_ptr(&local_list_length, cpu) = 0;
         INIT_LIST_HEAD(per_cpu_ptr(&local_list_head.list, cpu)); // 头结点指向自己

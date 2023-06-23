@@ -91,11 +91,8 @@ static void notrace add_into_hashtable(unsigned long lock_addr) {
                 #endif
                 struct lock_process_stack *new_node;
                 struct pid_array *pid_array_ptr;
-                //ktime_get_ts64(&before_alloc);
 
                 new_node = kmalloc(sizeof(struct lock_process_stack), GFP_ATOMIC);
-                //ktime_get_ts64(&after_alloc);
-                //pr_info("Alloc cost %lld ns\n", (after_alloc.tv_sec - before_alloc.tv_sec) * 1000000000ll + after_alloc.tv_nsec - before_alloc.tv_nsec);
                 if (new_node == NULL) {
                     pr_err("Can't alloc mem!\n");
                 }
@@ -232,12 +229,12 @@ static void notrace add_into_hashtable(unsigned long lock_addr) {
 }
 static int notrace pre_handler_spin_lock_irqsave(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
-    local_irq_save(irq_flags);
+    raw_local_irq_save(irq_flags);
     preempt_disable();
     // smp_mb();
     //if (atomic_cmpxchg(this_cpu_ptr(&in_prober[0]), 0, 1)) {
     if (!uspin_trylock(this_cpu_ptr(&in_prober[0]))) {
-        local_irq_restore(irq_flags);
+        raw_local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
@@ -255,19 +252,19 @@ static int notrace pre_handler_spin_lock_irqsave(struct kprobe *p, struct pt_reg
     //atomic_set(this_cpu_ptr(&in_prober[0]), false);
     uspin_unlock(this_cpu_ptr(&in_prober[0]));
     smp_mb();//ORIG smp_wmb();
-    local_irq_restore(irq_flags);
+    raw_local_irq_restore(irq_flags);
     preempt_enable();
 
     return 0;
 }
 static int notrace pre_handler_spin_lock(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
-    local_irq_save(irq_flags);
+    raw_local_irq_save(irq_flags);
     preempt_disable();
     // smp_mb();
     // if (atomic_cmpxchg(this_cpu_ptr(&in_prober[1]), 0, 1)) {
     if (!uspin_trylock(this_cpu_ptr(&in_prober[1]))) {
-        local_irq_restore(irq_flags);
+        raw_local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
@@ -281,19 +278,19 @@ static int notrace pre_handler_spin_lock(struct kprobe *p, struct pt_regs *regs)
     // atomic_set(this_cpu_ptr(&in_prober[1]), false);
     uspin_unlock(this_cpu_ptr(&in_prober[1]));
     smp_mb();//ORIG smp_wmb();
-    local_irq_restore(irq_flags);
+    raw_local_irq_restore(irq_flags);
     preempt_enable();
 
     return 0;
 }
 static int notrace pre_handler_spin_lock_irq(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
-    local_irq_save(irq_flags);
+    raw_local_irq_save(irq_flags);
     preempt_disable();
     // smp_mb();
     // if (atomic_cmpxchg(this_cpu_ptr(&in_prober[2]), 0, 1)) {
     if (!uspin_trylock(this_cpu_ptr(&in_prober[2]))) {
-        local_irq_restore(irq_flags);
+        raw_local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
@@ -307,18 +304,18 @@ static int notrace pre_handler_spin_lock_irq(struct kprobe *p, struct pt_regs *r
     // atomic_set(this_cpu_ptr(&in_prober[2]), false);
     uspin_unlock(this_cpu_ptr(&in_prober[2]));
     smp_mb();//ORIG smp_wmb();
-    local_irq_restore(irq_flags);
+    raw_local_irq_restore(irq_flags);
     preempt_enable();
     return 0;
 }
 static int notrace pre_handler_spin_lock_bh(struct kprobe *p, struct pt_regs *regs) {
     unsigned long irq_flags;
-    local_irq_save(irq_flags);
+    raw_local_irq_save(irq_flags);
     preempt_disable();
     // smp_mb();
     // if (atomic_cmpxchg(this_cpu_ptr(&in_prober[3]), 0, 1)) {
     if (!uspin_trylock(this_cpu_ptr(&in_prober[3]))) {
-        local_irq_restore(irq_flags);
+        raw_local_irq_restore(irq_flags);
         preempt_enable();
         return 0;
     }
@@ -332,7 +329,7 @@ static int notrace pre_handler_spin_lock_bh(struct kprobe *p, struct pt_regs *re
     // atomic_set(this_cpu_ptr(&in_prober[3]), false);
     uspin_unlock(this_cpu_ptr(&in_prober[3]));
     smp_mb();//ORIG smp_wmb();
-    local_irq_restore(irq_flags);
+    raw_local_irq_restore(irq_flags);
     preempt_enable();
     return 0;
 }
@@ -436,7 +433,7 @@ void notrace stop_lock_trace(void)
     unregister_kprobes(probe_locks, 4);
     rcu_barrier();
     // 先关中断，再关抢占，最后持有锁
-    local_irq_save(irq_flags);
+    raw_local_irq_save(irq_flags);
     preempt_disable();
     uspin_lock(&table_lock);
     smp_mb();
@@ -509,7 +506,7 @@ void notrace stop_lock_trace(void)
     }
     // 先释放锁，再开中断，最后开抢占
     uspin_unlock(&table_lock);
-    local_irq_restore(irq_flags);
+    raw_local_irq_restore(irq_flags);
     preempt_enable();
     pr_info("Stop trace locks, hash table load num is %d\n", hash_table_load_num);
     hash_table_load_num = 0;
